@@ -2,6 +2,9 @@
 
 ATTENTION both the PY and the exe must be inside of a Bedrock Node folder in your server directory. if you download the Zips remove the Bedrock Node folder from the zips after you unpack them and put them in your server folder. check releases for official vs
 
+Discord link for contacting me reporting bugs asking questions about installation 
+https://discord.com/invite/VF2b9Gg7Xg
+
 An automated server management wrapper and admin web dashboard for Minecraft Bedrock Dedicated Servers (BDS). Featuring real-time console streaming, automated backups/restarts, crash detection, hourly player analytics, and a secure Ban Matrix.
 
 ---
