@@ -1,5 +1,7 @@
 # Bedrock-Node
 
+ATTENTION both the PY and the exe must be inside of a Bedrock Node folder in your server directory. if you download the Zips remove the Bedrock Node folder from the zips after you unpack them and put them in your server folder. check releases for official vs
+
 An automated server management wrapper and admin web dashboard for Minecraft Bedrock Dedicated Servers (BDS). Featuring real-time console streaming, automated backups/restarts, crash detection, hourly player analytics, and a secure Ban Matrix.
 
 ---
@@ -27,11 +29,16 @@ An automated server management wrapper and admin web dashboard for Minecraft Bed
 
 #### Option 1: Running the Executable (`.exe`)
 1. Download `Bedrock-Node.exe` from the **[Releases Page](https://github.com/stonercraft420/Bedrock-Node/releases/latest)**.
-2. Place the executable in your Minecraft Bedrock Server directory.
+2. Place the Bedrock Node folder that is inside the main exe folder in your Minecraft Bedrock Server directory.
 3. Run `Bedrock-Node.exe` and access the dashboard in your web browser.
 
 #### Option 2: Running from Source (`.py`)
 1. Clone or download this repository.
-2. Install the required Python dependencies:
-   ```bash
-   pip install -r requirements.txt
+2. Install the Python V3.12 or newer 
+open command prompt and run 
+
+winget install Python.Python.3.12
+
+3. download the py zip and unzip it take the Bedrock Node folder nested inside out and place that in your server directory
+
+4. run the py 
