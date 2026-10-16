@@ -17,37 +17,6 @@ import sys
 import platform
 import stat
 
-REQUIRED_PACKAGES = [
-    "discord.py",
-    "python-dotenv",
-    "flask",
-    "flask-socketio",
-    "matplotlib",
-    "numpy",
-    "psutil",
-    "colorama",
-    "werkzeug",
-]
-
-
-def check_and_install_packages():
-  for package in REQUIRED_PACKAGES:
-    import_name = (
-        "discord"
-        if package == "discord.py"
-        else "dotenv"
-        if package == "python-dotenv"
-        else package.replace("-", "_")
-    )
-    try:
-      __import__(import_name)
-    except ImportError:
-      print(f"[SETUP] Missing required package '{package}'. Installing...")
-      subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-
-check_and_install_packages()
-
 import colorama
 import secrets
 import tkinter as tk
@@ -92,6 +61,7 @@ VC_STATUS_ID = int(os.getenv("VC_STATUS_ID", 0))
 VC_PLAYERS_ID = int(os.getenv("VC_PLAYERS_ID", 0))
 
 FLASK_PORT = int(os.getenv("FLASK_PORT", 5000))
+FLASK_HOST = os.getenv("FLASK_HOST", "127.0.0.1")
 
 G, W, R, Y, C, B, PURPLE, END = (
     "\033[92m",
@@ -138,18 +108,22 @@ BAN_HTML_TEMPLATE = """
 <meta name="apple-mobile-web-app-title" content="Bedrock Node">
 <style>
 body { 
-    background: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}") fixed center; 
-    background-size: cover; 
-    color: #0f4; 
-    font-family: sans-serif; 
-    margin: 0; 
-    padding: 20px; 
-    display: flex; 
-    justify-content: center; 
-    align-items: center;
-    min-height: 100vh;
-    box-sizing: border-box;
-}
+        background-color: #000000;
+        background-image: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}");
+        background-attachment: fixed;
+        background-position: center;
+        background-size: cover;
+        color: #0f4; 
+        font-family: sans-serif; 
+        margin: 0; 
+        padding: 20px; 
+        padding-top: 80px; 
+        display: flex; 
+        flex-direction: column; 
+        align-items: center; 
+        gap: 20px; 
+        position: relative; 
+    }
 
 .panel { 
     width: 100%; 
@@ -475,8 +449,9 @@ def run_desktop_wizard(data_dir):
         "game_choice": tk.StringVar(value="1"),
         "web_choice": tk.StringVar(value="1"),
         "cf_token": tk.StringVar(value=""),
-        "admins": {}, 
-        "ban_code": tk.StringVar(value="BAN123"),
+        "admins": {},
+        "ban_code": tk.StringVar(value=""),
+        "settings_pw": tk.StringVar(value=""),
         "bot_token": tk.StringVar(value=""),
         "webhook_url": tk.StringVar(value=""),
         "vc_status": tk.StringVar(value="0"),
@@ -524,15 +499,32 @@ def run_desktop_wizard(data_dir):
             except Exception:
                 pass
             
+            default_admin_pass = secrets.token_hex(8)
+            default_ban_code = secrets.token_hex(6).upper()
+            default_settings_pass = secrets.token_hex(8)
+
             if not state["admins"]:
-                state["admins"]["owner"] = generate_password_hash("password123")
+              state["admins"]["owner"] = generate_password_hash(default_admin_pass)
+              print(
+                  f"\n{Y}[SECURITY NOTICE] No admin added. Generated default admin"
+                  f" 'owner' with secure password: {default_admin_pass}{END}\n"
+              )
 
-            with open(os.path.join(data_dir, "secureaccounts.json"), "w", encoding="utf-8") as f:
-                json.dump(state["admins"], f, indent=4)
+            with open(
+                os.path.join(data_dir, "secureaccounts.json"), "w", encoding="utf-8"
+            ) as f:
+              json.dump(state["admins"], f, indent=4)
 
-            use_playit = True if state["game_choice"].get() == "2" or state["web_choice"].get() == "2" else False
+            use_playit = (
+                True
+                if state["game_choice"].get() == "2"
+                or state["web_choice"].get() == "2"
+                else False
+            )
 
+            flask_host = "127.0.0.1" if state["web_choice"].get() == "1" else "0.0.0.0"
             flask_secret = secrets.token_hex(32)
+
             env_content = (
                 "# --- BEDROCK NODE CONFIGURATION ---\n"
                 f"USE_PLAYIT={'True' if use_playit else 'False'}\n"
@@ -542,9 +534,10 @@ def run_desktop_wizard(data_dir):
                 f"VC_STATUS_ID={state['vc_status'].get().strip() or '0'}\n"
                 f"VC_PLAYERS_ID={state['vc_players'].get().strip() or '0'}\n\n"
                 f"FLASK_PORT=5000\n"
+                f"FLASK_HOST={flask_host}\n"
                 f"FLASK_SECRET_KEY={flask_secret}\n"
-                f"BAN_SECRET_CODE={state['ban_code'].get().strip() or 'BAN123'}\n"
-                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip() or 'admin123'}\n"
+                f"BAN_SECRET_CODE={state['ban_code'].get().strip()}\n"       # <-- Strict user input
+                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip()}\n"   # <-- Strict user input
             )
 
             with open(os.path.join(data_dir, "securekeys.env"), "w", encoding="utf-8") as f:
@@ -776,14 +769,13 @@ def run_desktop_wizard(data_dir):
             tk.Label(form_frame, text="Admin User:", fg=fg_color, bg=bg_color, font=("Courier", 9)).grid(row=0, column=0, sticky="w", pady=2)
             u_entry = tk.Entry(form_frame, bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25)
             u_entry.grid(row=0, column=1, padx=10, pady=2)
-            u_entry.insert(0, "owner")
 
             tk.Label(form_frame, text="Password:", fg=fg_color, bg=bg_color, font=("Courier", 9)).grid(row=1, column=0, sticky="w", pady=2)
-            p_entry = tk.Entry(form_frame, bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25)
+            p_entry = tk.Entry(form_frame, bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25, show="*") 
             p_entry.grid(row=1, column=1, padx=10, pady=2)
-            p_entry.insert(0, "password123")
+          
 
-            added_label = tk.Label(container, text=f"Admins Configured: {max(1, len(state['admins']))}", fg=accent_color, bg=bg_color, font=("Courier", 9, "bold"))
+            added_label = tk.Label(container, text=f"Admins Configured: {len(state['admins'])}", fg=accent_color, bg=bg_color, font=("Courier", 9, "bold"))
             added_label.pack(anchor="w", pady=5)
 
             def add_admin():
@@ -802,18 +794,45 @@ def run_desktop_wizard(data_dir):
 
             tk.Label(container, text="Ban Security Password (Ban Matrix):", fg=fg_color, bg=bg_color, font=("Courier", 9)).pack(anchor="w", pady=(10, 0))
             tk.Label(container, text="(Safety pin required when banning players from the web panel)", fg="#88cc88", bg=bg_color, font=("Courier", 8)).pack(anchor="w")
-            tk.Entry(container, textvariable=state["ban_code"], bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25).pack(anchor="w", pady=2)
+            ban_entry = tk.Entry(container, textvariable=state["ban_code"], bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25, show="*")
+            ban_entry.pack(anchor="w", pady=2)
 
-            state["settings_pw"] = tk.StringVar(value="admin123")
             tk.Label(container, text="Server Settings Password:", fg=fg_color, bg=bg_color, font=("Courier", 9)).pack(anchor="w", pady=(10, 0))
             tk.Label(container, text="(Required to unlock and modify Server Settings)", fg="#88cc88", bg=bg_color, font=("Courier", 8)).pack(anchor="w")
-            tk.Entry(container, textvariable=state["settings_pw"], bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25).pack(anchor="w", pady=2)
+            settings_entry = tk.Entry(container, textvariable=state["settings_pw"], bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25, show="*")
+            settings_entry.pack(anchor="w", pady=2)
+            state["settings_pw"].set("")
 
             def save_and_proceed():
                 u = u_entry.get().strip().lower()
                 p = p_entry.get().strip()
-                if u and p and u not in state["admins"]:
+                b_code = state["ban_code"].get().strip()
+                s_pw = state["settings_pw"].get().strip()
+
+                if u and p:
                     state["admins"][u] = generate_password_hash(p)
+
+                if not state["admins"]:
+                    messagebox.showerror(
+                        "Input Required", 
+                        "You must create an Admin Username and Password to proceed!"
+                    )
+                    return
+
+                if not b_code:
+                    messagebox.showerror(
+                        "Input Required", 
+                        "Please enter a Ban Matrix Security Code!"
+                    )
+                    return
+
+                if not s_pw:
+                    messagebox.showerror(
+                        "Input Required", 
+                        "Please enter a Server Settings Password!"
+                    )
+                    return
+
                 next_action()
 
             next_btn.config(command=save_and_proceed)
@@ -1925,6 +1944,7 @@ def manage_bans():
 
   load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
   expected_code = os.getenv("BAN_SECRET_CODE", "BAN")
+  ip = get_real_ip()
 
   if request.method == "POST":
     action = request.form.get("action")
@@ -2044,6 +2064,8 @@ def metrics_data():
 
 @app.route("/api/logs")
 def get_logs():
+  if not session.get("logged_in"):
+    return jsonify({"error": "Unauthorized"}), 401
   with state_lock:
     current_actions = list(last_actions)
   response = jsonify({"actions": current_actions})
@@ -2113,6 +2135,7 @@ def manage_settings():
       flask_secret = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
       use_playit = os.getenv("USE_PLAYIT", "False")
       current_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+      current_flask_host = os.getenv("FLASK_HOST", "127.0.0.1")
 
       env_content = (
           "# --- BEDROCK NODE CONFIGURATION ---\n"
@@ -2248,6 +2271,8 @@ def server_status():
 
 @app.route("/api/stats")
 def stats():
+  if not session.get("logged_in"):
+    return jsonify({"error": "Unauthorized"}), 401
   global ONLINE_PLAYERS
   uptime = (
       str(datetime.now() - start_time).split(".")[0]
@@ -2297,37 +2322,48 @@ def stats():
   response.headers.add("Access-Control-Allow-Methods", "GET")
   return response
 
+def get_real_ip():
+  if request.headers.get("X-Forwarded-For"):
+    return request.headers.get("X-Forwarded-For").split(",")[0].strip()
+  if request.headers.get("CF-Connecting-IP"):
+    return request.headers.get("CF-Connecting-IP").strip()
+  return request.remote_addr
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
   global failed_attempts
   
   current_accounts = load_accounts()
-    
-  ip = request.remote_addr
-  if failed_attempts.get(ip, 0) >= 3:
-    return (
-        "<body"
-        " style='background:#000;color:#f00;font-family:monospace;padding:50px;'><h1>LOCKED"
-        " OUT</h1></body>"
-    ), 403
+  ip = get_real_ip()
 
   if request.method == "POST":
     u, p = request.form.get("user", "").lower(), request.form.get("pw", "")
 
+    if failed_attempts.get(u, 0) >= 3:
+      return (
+          "<body style='background:#000;color:#f00;font-family:monospace;padding:50px;'>"
+          "<h1>ACCOUNT LOCKED OUT DUE TO MULTIPLE FAILED ATTEMPTS</h1></body>"
+      ), 403
+
     if u in current_accounts and check_password_hash(current_accounts[u], p):
       session["logged_in"] = True
       session["username"] = u
-      failed_attempts[ip] = 0
+      failed_attempts[u] = 0 
       log_admin_event("LOGIN", u, ip)
       return redirect(url_for("home"))
     else:
-      failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+      if u:
+        failed_attempts[u] = failed_attempts.get(u, 0) + 1
+        attempts_left = max(0, 3 - failed_attempts[u])
+      else:
+        attempts_left = 2
+
       time.sleep(2)
       return render_template_string(
-          """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.json"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Bedrock Node"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>ACCESS DENIED</h2><p>Attempt {{a}} of 3</p><form method="POST"><input name="user" placeholder="USER"><input name="pw" type="password" placeholder="PASS"><button>RETRY</button></form></div></body></html>""",
+          """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.json"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Bedrock Node"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>ACCESS DENIED</h2><p>Attempts remaining for '{{user}}': {{a}}</p><form method="POST"><input name="user" value="{{user}}" placeholder="USER"><input name="pw" type="password" placeholder="PASS"><button>RETRY</button></form></div></body></html>""",
           b=BACKGROUND_URL,
-          a=failed_attempts[ip],
+          user=u,
+          a=attempts_left,
       )
 
   return render_template_string(
@@ -2339,7 +2375,7 @@ def login():
 @app.route("/logout")
 def logout():
   username = session.get("username", "Unknown")
-  ip = request.remote_addr
+  ip = get_real_ip()
 
   if session.get("logged_in"):
     log_admin_event("LOGOUT", username, ip)
@@ -2383,8 +2419,11 @@ def home():
 
     <style>
     body { 
-        background: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}") fixed center; 
-        background-size: cover; 
+        background-color: #000000;
+        background-image: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}");
+        background-attachment: fixed;
+        background-position: center;
+        background-size: cover;
         color: #0f4; 
         font-family: sans-serif; 
         margin: 0; 
@@ -2827,7 +2866,7 @@ if __name__ == "__main__":
         threading.Thread(target=hourly_metrics_logger, daemon=True).start()
         threading.Thread(target=websocket_stats_broadcaster, daemon=True).start()
 
-        socketio.run(app, host="0.0.0.0", port=FLASK_PORT)
+        socketio.run(app, host=FLASK_HOST, port=FLASK_PORT)
 
     except Exception as e:
         print(e)
