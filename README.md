@@ -43,11 +43,12 @@ An automated server management wrapper and admin web dashboard for Minecraft Bed
    ```powershell
    winget install Python.Python.3.12
 
-   (Close and reopen your terminal after installing).
+(Close and reopen your terminal after installing).
 3. Download the Python source zip, unzip it, take the Bedrock Node folder nested inside out, and place that folder directly into your server directory.
 4. Open a command prompt inside that Bedrock Node folder and install the required packages:
- 
+  ```powershell
   pip install -r requirements.txt
- 
- (close powershell)  
+  ```
+
+(close powershell)  
 5. Run your script (Bedrock Node.py) to launch the setup wizard and start the server.
