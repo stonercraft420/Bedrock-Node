@@ -20,28 +20,34 @@ An automated server management wrapper and admin web dashboard for Minecraft Bed
 
 ### Key Features
 
-* **Web Control Panel**: Real-time server status, console output, and administrative web controls.
-* **Automated Backups**: Scheduled server backups with automatic retention management.
-* **Crash Recovery**: Auto-detects server crashes and restarts the process automatically.
-* **Player Analytics**: Tracks player activity and logs hourly metrics.
-* **Ban Matrix**: Streamlined player moderation and list management.
+- **Web Control Panel**: Real-time server status, console output, and administrative web controls.
+- **Automated Backups**: Scheduled server backups with automatic retention management.
+- **Crash Recovery**: Auto-detects server crashes and restarts the process automatically.
+- **Player Analytics**: Tracks player activity and logs hourly metrics.
+- **Ban Matrix**: Streamlined player moderation and list management.
 
 ---
 
-### Setup & Usage
+## Setup & Usage
 
-#### Option 1: Running the Executable (`.exe`)
-1. Download `Bedrock-Node.exe` from the **[Releases Page](https://github.com/stonercraft420/Bedrock-Node/releases/latest)**.
-2. Place the Bedrock Node folder that is inside the main exe folder in your Minecraft Bedrock Server directory.
-3. Run `Bedrock-Node.exe` and access the dashboard in your web browser.
+**ATTENTION:** Both the `.py` source code, the `requirements.txt` file, and the `.exe` must be kept inside a **Bedrock Node** folder within your main server directory. If you download the Zips, remove the inner `Bedrock Node` folder after unpacking and place it directly into your server folder.
 
-#### Option 2: Running from Source (`.py`)
-1. Clone or download this repository.
-2. Install the Python V3.12 or newer 
-open command prompt and run 
+### Option 1: Running the Executable (.exe)
+1. Download `Bedrock-Node.exe` from the Releases Page.
+2. Place the **Bedrock Node** folder from the release zip directly into your Minecraft Bedrock Server directory.
+3. Run `Bedrock-Node.exe` and access the dashboard in your web browser (`http://localhost:5000`).
 
-winget install Python.Python.3.12
+### Option 2: Running from Source (.py)
+1. Clone or download this repository and unzip the source files.
+2. **Install Python:** Ensure you have Python v3.12 or newer installed. If you don't have it yet, open PowerShell and run:
+   ```powershell
+   winget install Python.Python.3.12
 
-3. download the py zip and unzip it take the Bedrock Node folder nested inside out and place that in your server directory
-
-4. run the py 
+   (Close and reopen your terminal after installing).
+3. Download the Python source zip, unzip it, take the Bedrock Node folder nested inside out, and place that folder directly into your server directory.
+4. Open a command prompt inside that Bedrock Node folder and install the required packages:
+ 
+  pip install -r requirements.txt
+ 
+ (close powershell)  
+5. Run your script (Bedrock Node.py) to launch the setup wizard and start the server.
