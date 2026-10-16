@@ -1,0 +1,9 @@
+discord.py
+python-dotenv
+flask
+flask-socketio
+matplotlib
+numpy
+psutil
+colorama
+werkzeug
