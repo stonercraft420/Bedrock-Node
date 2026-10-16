@@ -536,8 +536,8 @@ def run_desktop_wizard(data_dir):
                 f"FLASK_PORT=5000\n"
                 f"FLASK_HOST={flask_host}\n"
                 f"FLASK_SECRET_KEY={flask_secret}\n"
-                f"BAN_SECRET_CODE={state['ban_code'].get().strip()}\n"       # <-- Strict user input
-                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip()}\n"   # <-- Strict user input
+                f"BAN_SECRET_CODE={state['ban_code'].get().strip()}\n"       
+                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip()}\n"   
             )
 
             with open(os.path.join(data_dir, "securekeys.env"), "w", encoding="utf-8") as f:
