@@ -13,7 +13,7 @@ An automated server management wrapper and admin web dashboard for Minecraft Bed
 
 | Distribution | Link | Description |
 | :--- | :--- | :--- |
-| **Windows Executable (`.exe`)** | **[Download Latest Release (v1.0.0)](https://github.com/stonercraft420/Bedrock-Node/releases/latest)** | **Recommended.** Standalone release with no Python installation required. |
+| **Windows Executable (`.exe`)** | **[Download Latest Release (v1.0.1)](https://github.com/stonercraft420/Bedrock-Node/releases/latest)** | **Recommended.** Standalone release with no Python installation required. |
 | **Python Source (`.py`)** | **[Download Source Code (Zip)](https://github.com/stonercraft420/Bedrock-Node/archive/refs/heads/main.zip)** | For users who prefer running directly from Python source code. |
 
 ---
