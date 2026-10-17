@@ -22,20 +22,20 @@ import secrets
 import tkinter as tk
 import webbrowser
 
-from datetime import datetime, timedelta
-import discord
-from discord.ext import tasks
-from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
-from flask_socketio import SocketIO, emit
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 import psutil
 from tkinter import messagebox, ttk
+
+from datetime import datetime, timedelta
+import discord
+from discord.ext import tasks
+from dotenv import load_dotenv
+from flask import Flask, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
+from flask_socketio import SocketIO, emit
 from werkzeug.security import check_password_hash, generate_password_hash
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -471,6 +471,7 @@ def run_desktop_wizard(data_dir):
     next_btn.pack(side="right")
 
     def next_action():
+        nonlocal current_step
         step = current_step.get()
         
         if step < 6:
@@ -543,8 +544,12 @@ def run_desktop_wizard(data_dir):
             with open(os.path.join(data_dir, "securekeys.env"), "w", encoding="utf-8") as f:
                 f.write(env_content)
 
+            state.clear()
+            current_step = None
+
             root.destroy()
             open_as_app("http://localhost:5000")
+
     def prev_action():
         step = current_step.get()
         if step > 1:
@@ -1603,7 +1608,7 @@ def server_manager():
 
         bar_len = max(40, min(term_width - 2, 105))
         divider = "=" * bar_len
-        title = "BEDROCK NODE HUB (v1)"
+        title = "BEDROCK NODE HUB (v1.0.1)"
 
         print(f"{G}{B}{divider}{END}")
         print(f"{G}{B}{title:^{bar_len}}{END}")
@@ -1827,19 +1832,21 @@ def generate_plot_image(
   if not timestamps:
     return ""
 
-  plt.rcParams.update({
-      "figure.facecolor": "#000c00",
-      "axes.facecolor": "#000c00",
-      "savefig.facecolor": "#000c00",
-      "savefig.edgecolor": "none",
-      "axes.edgecolor": "#0f44",
-      "axes.labelcolor": "#0f4",
-      "xtick.color": "#0f4",
-      "ytick.color": "#0f4",
-      "text.color": "#0f4",
-  })
+  from matplotlib.figure import Figure
 
-  fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+  fig = Figure(figsize=(10, 5), dpi=100, facecolor="#000c00")
+  ax = fig.add_subplot(111)
+  
+  ax.set_facecolor("#000c00")
+  ax.spines['bottom'].set_color('#0f44')
+  ax.spines['top'].set_color('#0f44')
+  ax.spines['left'].set_color('#0f44')
+  ax.spines['right'].set_color('#0f44')
+  ax.xaxis.label.set_color('#0f4')
+  ax.yaxis.label.set_color('#0f4')
+  ax.tick_params(axis='x', colors='#0f4')
+  ax.tick_params(axis='y', colors='#0f4')
+
   x_indexes = np.arange(len(timestamps))
 
   formatted_labels = []
@@ -1901,14 +1908,13 @@ def generate_plot_image(
   for text in legend.get_texts():
     text.set_color("#0f4")
 
-  plt.tight_layout()
+  fig.tight_layout()
 
   buf = io.BytesIO()
-  plt.savefig(buf, format="png", bbox_inches="tight")
+  fig.savefig(buf, format="png", bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none')
   buf.seek(0)
   chart_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-  plt.close(fig)
-
+  
   return chart_b64
 
 @app.route("/background.png")
@@ -2833,14 +2839,25 @@ if __name__ == "__main__":
     env_path = os.path.join(DATA_DIR, "securekeys.env")
     accounts_path = os.path.join(DATA_DIR, "secureaccounts.json")
 
+    # Run the setup wizard on the main thread if config is missing
     if not os.path.exists(env_path) or not os.path.exists(accounts_path):
         print("No configuration found. Launching desktop setup wizard GUI...")
         run_desktop_wizard(DATA_DIR)
         print("Wizard complete. Starting Bedrock Node Hub...")
     else:
         print("Configuration found. Starting Bedrock Node Hub...")
-
+        # Only open the browser app if we aren't running the wizard
         threading.Thread(target=lambda: (time.sleep(2), open_as_app("http://localhost:5000")), daemon=True).start()
+
+    try:
+        from matplotlib.figure import Figure
+        dummy_fig = Figure(figsize=(1, 1))
+        dummy_ax = dummy_fig.add_subplot(111)
+        dummy_ax.plot([0, 1], [0, 1])
+        dummy_buf = io.BytesIO()
+        dummy_fig.savefig(dummy_buf, format='png')
+    except Exception:
+        pass
 
     ACCOUNTS = load_accounts()
 
@@ -2858,6 +2875,7 @@ if __name__ == "__main__":
         )
 
     try:
+        # Start all background services AFTER Tkinter has fully closed (if wizard ran)
         threading.Thread(target=server_manager, daemon=True).start()
         threading.Thread(target=local_console_bridge, daemon=True).start()
         threading.Thread(target=restart_timer, daemon=True).start()
