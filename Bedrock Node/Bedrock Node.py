@@ -79,6 +79,8 @@ colorama.init(autoreset=True)
 app = Flask(__name__, static_folder='images', static_url_path='/images')
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "default_secret_key")
 
+cookie_secure_setting = os.getenv("COOKIE_SECURE", "False").lower() == "true"
+
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
@@ -88,9 +90,9 @@ socketio = SocketIO(
 )
 
 app.config.update(
-    SESSION_COOKIE_SECURE=True, 
-    SESSION_COOKIE_HTTPONLY=True, 
-    SESSION_COOKIE_SAMESITE="Lax", 
+    SESSION_COOKIE_SECURE=cookie_secure_setting,      
+    SESSION_COOKIE_HTTPONLY=True,   
+    SESSION_COOKIE_SAMESITE='Lax', 
 )
 
 IS_WINDOWS = os.name == "nt"
@@ -538,7 +540,8 @@ def run_desktop_wizard(data_dir):
                 f"FLASK_HOST={flask_host}\n"
                 f"FLASK_SECRET_KEY={flask_secret}\n"
                 f"BAN_SECRET_CODE={state['ban_code'].get().strip()}\n"       
-                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip()}\n"   
+                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip()}\n"  
+                f"COOKIE_SECURE=False\n" 
             )
 
             with open(os.path.join(data_dir, "securekeys.env"), "w", encoding="utf-8") as f:
