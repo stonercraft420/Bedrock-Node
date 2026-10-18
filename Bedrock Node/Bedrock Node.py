@@ -2842,14 +2842,14 @@ if __name__ == "__main__":
     env_path = os.path.join(DATA_DIR, "securekeys.env")
     accounts_path = os.path.join(DATA_DIR, "secureaccounts.json")
 
-    # Run the setup wizard on the main thread if config is missing
+
     if not os.path.exists(env_path) or not os.path.exists(accounts_path):
         print("No configuration found. Launching desktop setup wizard GUI...")
         run_desktop_wizard(DATA_DIR)
         print("Wizard complete. Starting Bedrock Node Hub...")
     else:
         print("Configuration found. Starting Bedrock Node Hub...")
-        # Only open the browser app if we aren't running the wizard
+
         threading.Thread(target=lambda: (time.sleep(2), open_as_app("http://localhost:5000")), daemon=True).start()
 
     try:
@@ -2878,7 +2878,6 @@ if __name__ == "__main__":
         )
 
     try:
-        # Start all background services AFTER Tkinter has fully closed (if wizard ran)
         threading.Thread(target=server_manager, daemon=True).start()
         threading.Thread(target=local_console_bridge, daemon=True).start()
         threading.Thread(target=restart_timer, daemon=True).start()
