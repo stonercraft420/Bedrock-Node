@@ -41,8 +41,14 @@ from werkzeug.security import check_password_hash, generate_password_hash
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 DISCORD_ENABLED = True
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 SERVER_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+PROPERTIES_FILE = os.path.join(SERVER_DIR, "server.properties")
 DATA_DIR = os.path.join(SCRIPT_DIR, "server_vault")
 if not os.path.exists(DATA_DIR):
   os.makedirs(DATA_DIR)
@@ -323,6 +329,7 @@ is_restarting = False
 seconds_left = 0
 start_time = None
 restart_timer_start = datetime.now()
+backup_timer_start = datetime.now()
 last_actions = []
 failed_attempts = {}
 needs_backup = False
@@ -904,6 +911,15 @@ def get_notes():
     except Exception:
       return "No notes yet..."
 
+def get_server_properties():
+  try:
+    if os.path.exists(PROPERTIES_FILE):
+      with open(PROPERTIES_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+  except Exception as e:
+    print(f"Error reading server.properties: {e}")
+  return "Error reading server.properties..."
+
 
 def load_blacklist():
   """Loads blacklisted players safely using a thread lock."""
@@ -1008,32 +1024,28 @@ def run_discord_bot():
 
 
 def restart_timer():
-  """Restarts the server at fixed intervals: 2:00 AM, 2:00 PM, and 8:00 PM."""
+  """Restarts the server based on a configurable hourly interval."""
   global restart_timer_start
-  last_restart_key = None
-
   while True:
-    now = datetime.now()
-    target_hours = [2, 14, 20]
+    try:
+      load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+      interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
+    except Exception:
+      interval_hours = 6.0
 
-    if now.hour in target_hours and now.minute == 0:
-      restart_key = (now.date(), now.hour)
-      if last_restart_key != restart_key:
-        last_restart_key = restart_key
+    elapsed = datetime.now() - restart_timer_start
+    if elapsed >= timedelta(hours=interval_hours):
+      send_to_mc(
+          f"say Server restarting in 1 minute ({interval_hours}-hour cycle) find a safe spot",
+          "SYSTEM",
+      )
+      time.sleep(60)
+      send_to_mc("stop", "AUTORESTART")
 
-        send_to_mc(
-            "say Server restarting in 1 minute find a safe spot", "SYSTEM"
-        )
-        time.sleep(60)
-        send_to_mc("stop", "AUTORESTART")
+      restart_timer_start = datetime.now()
+      time.sleep(65)
 
-        restart_timer_start = datetime.now()
-        time.sleep(65)
-    else:
-      if last_restart_key is not None and now.minute != 0:
-        last_restart_key = None
-
-    time.sleep(15)
+    time.sleep(30)
 
 
 def hourly_metrics_logger():
@@ -1214,35 +1226,41 @@ def cleanup_old_backups(backup_dir, days_to_keep=3):
 
 
 def nightly_backup_scheduler():
-  global needs_backup, last_backup_date, mc_process, is_backing_up
+  global needs_backup, last_backup_date, mc_process, is_backing_up, backup_timer_start
+
   while True:
-    now = datetime.now()
-    if now.hour == 8 and now.minute == 0:
-      today = now.date()
-      if last_backup_date != today:
-        last_backup_date = today
-        is_backing_up = True
+    try:
+      load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+      backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
+    except Exception:
+      backup_interval_hours = 24.0
 
-        print("Initiating scheduled backup sequence...")
-        send_to_mc(
-            "say Server backing up in 5 minutes for daily maintenance.",
-            "SYSTEM",
-        )
-        time.sleep(270)
-        send_to_mc(
-            "say Server backing up in 30 seconds! Find a safe spot...",
-            "SYSTEM",
-        )
-        time.sleep(30)
-        send_to_mc("stop", "SYSTEM")
+    elapsed = datetime.now() - backup_timer_start
+    if elapsed >= timedelta(hours=backup_interval_hours):
+      is_backing_up = True
 
-        if mc_process:
-          mc_process.wait()
+      print("Initiating scheduled backup sequence...")
+      send_to_mc(
+          "say Server backing up in 5 minutes for scheduled maintenance.",
+          "SYSTEM",
+      )
+      time.sleep(270)
+      send_to_mc(
+          "say Server backing up in 30 seconds! Find a safe spot...",
+          "SYSTEM",
+      )
+      time.sleep(30)
+      send_to_mc("stop", "SYSTEM")
 
-        time.sleep(5)
-        backup_world()
-        is_backing_up = False
-    time.sleep(30)
+      if mc_process:
+        mc_process.wait()
+
+      time.sleep(5)
+      backup_world()
+      is_backing_up = False
+      backup_timer_start = datetime.now()
+
+    time.sleep(60)
 
 
 def send_to_mc(cmd, source="SYSTEM", silent=False):
@@ -1441,6 +1459,7 @@ def stdout_reader():
 
 def websocket_stats_broadcaster():
   """Pushes server stats to all connected web clients every few seconds."""
+  global backup_timer_start
   while True:
     time.sleep(3)
     try:
@@ -1451,20 +1470,21 @@ def websocket_stats_broadcaster():
       )
 
       now = datetime.now()
-      target_hours = [2, 8, 14, 20]
-      next_target = None
-      for h in target_hours:
-        candidate = now.replace(hour=h, minute=0, second=0, microsecond=0)
-        if candidate > now:
-          next_target = candidate
-          break
-      if not next_target:
-        next_target = (now + timedelta(days=1)).replace(
-            hour=2, minute=0, second=0, microsecond=0
-        )
+      try:
+        load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+        interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
+        backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
+      except Exception:
+        interval_hours = 6.0
+        backup_interval_hours = 24.0
 
-      remaining = next_target - now
+      next_target = restart_timer_start + timedelta(hours=interval_hours)
+      remaining = next_target - now if next_target > now else timedelta(0)
       restart_in = str(remaining).split(".")[0]
+
+      next_backup_target = backup_timer_start + timedelta(hours=backup_interval_hours)
+      backup_remaining = next_backup_target - now if next_backup_target > now else timedelta(0)
+      backup_in = str(backup_remaining).split(".")[0]
 
       with state_lock:
         p_count = len(ONLINE_PLAYERS) if is_running else 0
@@ -1480,6 +1500,7 @@ def websocket_stats_broadcaster():
           "uptime": uptime,
           "status": "ONLINE" if is_running else "OFFLINE",
           "restart_in": restart_in,
+          "backup_in": backup_in,
           "players": players_str,
       }
 
@@ -1945,6 +1966,137 @@ def serve_manifest():
       "icons": [{"src": "/icon.png", "sizes": "512x512", "type": "image/png"}],
   })
 
+@app.route("/discord", methods=["GET", "POST"])
+def manage_discord():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    
+    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+    
+    if not session.get("discord_unlocked"):
+        if request.method == "POST":
+            entered_pw = request.form.get("settings_pw", "")
+            if entered_pw == expected_settings_pw:
+                session["discord_unlocked"] = True
+                return redirect(url_for("manage_discord"))
+            else:
+                return render_template_string(
+                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>DISCORD LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password. Try again:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+                    b=BACKGROUND_URL
+                )
+        
+        return render_template_string(
+            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>DISCORD LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+            b=BACKGROUND_URL
+        )
+
+    env_path = os.path.join(DATA_DIR, "securekeys.env")
+
+    if request.method == "POST":
+        bot_token = request.form.get("bot_token", "").strip()
+        webhook_url = request.form.get("webhook_url", "").strip()
+        vc_status = request.form.get("vc_status", "0").strip()
+        vc_players = request.form.get("vc_players", "0").strip()
+
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        new_lines = []
+        keys_updated = set()
+        updates = {
+            "DISCORD_BOT_TOKEN": bot_token,
+            "ADMIN_WEBHOOK_URL": webhook_url,
+            "VC_STATUS_ID": vc_status,
+            "VC_PLAYERS_ID": vc_players,
+        }
+
+        for line in lines:
+            line_str = line.strip()
+            if line_str and not line_str.startswith("#") and "=" in line_str:
+                k = line_str.split("=")[0].strip()
+                if k in updates:
+                    new_lines.append(f"{k}={updates[k]}\n")
+                    keys_updated.add(k)
+                    continue
+            new_lines.append(line)
+
+        for k, v in updates.items():
+            if k not in keys_updated:
+                new_lines.append(f"{k}={v}\n")
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+        send_admin_alert(
+            f"🤖 **DISCORD SETTINGS UPDATED:** Modified by `{session.get('username')}`."
+        )
+        return redirect(url_for("manage_discord"))
+
+    return render_template_string(
+        """
+        <!DOCTYPE html><html><head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="icon" type="image/png" href="/icon.png">
+        <style>
+        body { 
+          background-color: #000; 
+          background-image: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}");
+          background-attachment: fixed;
+          background-position: center;
+          background-size: cover;
+          color: #0f4; 
+          font-family: sans-serif; 
+          padding: 20px; 
+          display: flex; 
+          justify-content: center; 
+          align-items: center; 
+          min-height: 100vh; 
+          box-sizing: border-box; 
+          margin: 0;
+        }
+        .panel { width: 100%; max-width: 600px; border: 1px solid #0f45; padding: 25px; border-radius: 20px; background: rgba(0,12,0,0.95); box-sizing: border-box; position: relative; }
+        .close-btn { position: absolute; top: 15px; right: 15px; padding: 5px 12px; background: #ff4444; color: #fff; text-decoration: none; font-family: monospace; font-weight: bold; border-radius: 5px; }
+        .warning-box { background: rgba(0, 255, 204, 0.1); border: 1px solid #00ffcc55; padding: 12px; border-radius: 10px; margin-bottom: 20px; font-size: 12px; font-family: monospace; color: #00ffcc; text-align: center; line-height: 1.4; }
+        h2 { text-align: center; color: #0f4; margin-top: 0; }
+        input { width: 100%; background: #000; color: #0f4; border: 1px solid #0f44; padding: 10px; border-radius: 10px; box-sizing: border-box; font-size: 14px; margin-bottom: 12px; }
+        label { font-size: 13px; font-family: monospace; color: #88cc88; display: block; margin-bottom: 4px; }
+        button { width: 100%; padding: 12px; background: #0f4; color: #000; font-weight: bold; border: none; cursor: pointer; border-radius: 10px; font-size: 14px; margin-top: 10px; }
+        </style></head><body>
+        <div class="panel">
+            <a href="/" class="close-btn">[X]</a>
+            <h2>Discord Integration</h2>
+            
+            <div class="warning-box">
+                🤖 Configure Bot Tokens, Webhooks, and Live Voice Stats Channels below.
+            </div>
+
+            <form method="POST">
+                <label>Discord Bot Token:</label>
+                <input name="bot_token" value="{{ config.bot_token }}" autocomplete="off" placeholder="Bot Token...">
+                
+                <label>Admin Webhook URL (#server-alerts):</label>
+                <input name="webhook_url" value="{{ config.webhook_url }}" autocomplete="off" placeholder="https://discord.com/api/webhooks/...">
+                
+                <label>Status Voice Channel ID:</label>
+                <input name="vc_status" value="{{ config.vc_status }}" autocomplete="off" placeholder="Channel ID...">
+                
+                <label>Players Voice Channel ID:</label>
+                <input name="vc_players" value="{{ config.vc_players }}" autocomplete="off" placeholder="Channel ID...">
+                
+                <button type="submit">SAVE DISCORD SETTINGS</button>
+            </form>
+        </div>
+        </body></html>
+        """,
+        banner=BACKGROUND_URL,
+        config={
+            "bot_token": os.getenv("DISCORD_BOT_TOKEN", ""),
+            "webhook_url": os.getenv("ADMIN_WEBHOOK_URL", ""),
+            "vc_status": os.getenv("VC_STATUS_ID", "0"),
+            "vc_players": os.getenv("VC_PLAYERS_ID", "0"),
+        },
+    )
 
 @app.route("/bans", methods=["GET", "POST"])
 def manage_bans():
@@ -2034,6 +2186,91 @@ def manage_bans():
       BAN_HTML_TEMPLATE, bans=blacklist, banner=BACKGROUND_URL
   )
 
+@app.route("/properties", methods=["GET", "POST"])
+def manage_properties():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    
+    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+    
+    if not session.get("settings_unlocked"):
+        if request.method == "POST":
+            entered_pw = request.form.get("settings_pw", "")
+            if entered_pw == expected_settings_pw:
+                session["settings_unlocked"] = True
+                return redirect(url_for("manage_properties"))
+            else:
+                return render_template_string(
+                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>PROPERTIES LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password. Try again:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+                    b=BACKGROUND_URL
+                )
+        
+        return render_template_string(
+            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>PROPERTIES LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+            b=BACKGROUND_URL
+        )
+    
+    if request.method == "POST":
+        properties_content = request.form.get("properties_content", "")
+        try:
+            with open(PROPERTIES_FILE, "w", encoding="utf-8") as f:
+                f.write(properties_content)
+            send_admin_alert(
+                f"📝 **PROPERTIES UPDATED:** `server.properties` was modified by `{session.get('username')}`."
+            )
+        except Exception as e:
+            print(f"Error saving server.properties: {e}")
+        return redirect(url_for("manage_properties"))
+        
+    properties_data = get_server_properties()
+    return render_template_string(
+        """
+        <!DOCTYPE html><html><head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="icon" type="image/png" href="/icon.png">
+        <style>
+        body { 
+          background-color: #000; 
+          background-image: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}");
+          background-attachment: fixed;
+          background-position: center;
+          background-size: cover;
+          color: #0f4; 
+          font-family: sans-serif; 
+          padding: 20px; 
+          display: flex; 
+          justify-content: center; 
+          align-items: center; 
+          min-height: 100vh; 
+          box-sizing: border-box; 
+          margin: 0;
+        }
+        .panel { width: 100%; max-width: 800px; border: 1px solid #0f45; padding: 25px; border-radius: 20px; background: rgba(0,12,0,0.95); box-sizing: border-box; position: relative; }
+        .close-btn { position: absolute; top: 15px; right: 15px; padding: 5px 12px; background: #ff4444; color: #fff; text-decoration: none; font-family: monospace; font-weight: bold; border-radius: 5px; }
+        .warning-box { background: rgba(255, 170, 0, 0.1); border: 1px solid #ffaa0055; padding: 12px; border-radius: 10px; margin-bottom: 20px; font-size: 12px; font-family: monospace; color: #ffcc00; text-align: center; line-height: 1.4; }
+        h2 { text-align: center; color: #0f4; margin-top: 0; }
+        textarea { width: 100%; height: 400px; background: #000; color: #0f4; border: 1px solid #0f44; padding: 12px; border-radius: 10px; box-sizing: border-box; font-family: monospace; font-size: 13px; margin-bottom: 15px; resize: none; }
+        button { width: 100%; padding: 12px; background: #0f4; color: #000; font-weight: bold; border: none; cursor: pointer; border-radius: 10px; font-size: 14px; margin-top: 5px; }
+        </style></head><body>
+        <div class="panel">
+            <a href="/" class="close-btn">[X]</a>
+            <h2>Server Properties Editor</h2>
+            
+            <div class="warning-box">
+                ⚠️ <b>WARNING:</b> You must restart the server for property changes to take effect!
+            </div>
+
+            <form method="POST">
+                <textarea name="properties_content">{{properties_content}}</textarea>
+                <button type="submit">SAVE PROPERTIES</button>
+            </form>
+        </div>
+        </body></html>
+        """,
+        banner=BACKGROUND_URL,
+        properties_content=properties_data
+    )
 
 @app.route("/metrics-data", methods=["POST"])
 def metrics_data():
@@ -2111,11 +2348,10 @@ def manage_settings():
     expected_code = os.getenv("BAN_SECRET_CODE", "BAN123")
     
     if request.method == "POST":
-      bot_token = request.form.get("bot_token", "").strip()
-      webhook_url = request.form.get("webhook_url", "").strip()
-      vc_status = request.form.get("vc_status", "0").strip()
-      vc_players = request.form.get("vc_players", "0").strip()
       cf_token = request.form.get("cf_token", "").strip()
+
+      restart_hours = request.form.get("restart_hours", "6").strip()
+      backup_hours = request.form.get("backup_hours", "24").strip()
 
       new_ban_code = request.form.get("ban_code", "").strip()
       ban_code = new_ban_code if new_ban_code else expected_code
@@ -2144,12 +2380,18 @@ def manage_settings():
       flask_secret = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
       use_playit = os.getenv("USE_PLAYIT", "False")
       current_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
-      current_flask_host = os.getenv("FLASK_HOST", "127.0.0.1")
+
+      bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
+      webhook_url = os.getenv("ADMIN_WEBHOOK_URL", "")
+      vc_status = os.getenv("VC_STATUS_ID", "0")
+      vc_players = os.getenv("VC_PLAYERS_ID", "0")
 
       env_content = (
           "# --- BEDROCK NODE CONFIGURATION ---\n"
           f"USE_PLAYIT={use_playit}\n"
-          f"CLOUDFLARE_TUNNEL_TOKEN={cf_token}\n\n"
+          f"CLOUDFLARE_TUNNEL_TOKEN={cf_token}\n"
+          f"RESTART_INTERVAL_HOURS={restart_hours}\n"
+          f"BACKUP_INTERVAL_HOURS={backup_hours}\n\n"
           f"DISCORD_BOT_TOKEN={bot_token}\n"
           f"ADMIN_WEBHOOK_URL={webhook_url}\n"
           f"VC_STATUS_ID={vc_status}\n"
@@ -2175,53 +2417,83 @@ def manage_settings():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link rel="icon" type="image/png" href="/icon.png">
         <style>
-        body { background: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}") fixed center; background-size: cover; color: #0f4; font-family: sans-serif; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; box-sizing: border-box; margin:0;}
-        .panel { width: 100%; max-width: 600px; border: 1px solid #0f45; padding: 25px; border-radius: 20px; background: rgba(0,12,0,0.95); box-sizing: border-box; position: relative; }
+        body { 
+          background-color: #000; 
+          background-image: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}");
+          background-attachment: fixed;
+          background-position: center;
+          background-size: cover;
+          color: #0f4; 
+          font-family: sans-serif; 
+          padding: 20px; 
+          display: flex; 
+          justify-content: center; 
+          align-items: center; 
+          min-height: 100vh; 
+          box-sizing: border-box; 
+          margin: 0;
+        }
+        .panel { width: 100%; max-width: 650px; border: 1px solid #0f45; padding: 25px; border-radius: 20px; background: rgba(0,12,0,0.95); box-sizing: border-box; position: relative; }
         .close-btn { position: absolute; top: 15px; right: 15px; padding: 5px 12px; background: #ff4444; color: #fff; text-decoration: none; font-family: monospace; font-weight: bold; border-radius: 5px; }
         .warning-box { background: rgba(255, 170, 0, 0.1); border: 1px solid #ffaa0055; padding: 12px; border-radius: 10px; margin-bottom: 20px; font-size: 12px; font-family: monospace; color: #ffcc00; text-align: center; line-height: 1.4; }
-        h2 { text-align: center; color: #0f4; margin-top: 0; }
+        h2 { text-align: center; color: #0f4; margin-top: 0; margin-bottom: 20px; }
+        .section-card { background: rgba(0, 255, 68, 0.03); border: 1px solid #0f42; padding: 18px; border-radius: 12px; margin-bottom: 15px; }
+        .section-title { font-size: 11px; font-family: monospace; color: #0f48; letter-spacing: 1.5px; margin-bottom: 12px; text-transform: uppercase; border-bottom: 1px solid #0f42; padding-bottom: 6px; }
         input { width: 100%; background: #000; color: #0f4; border: 1px solid #0f44; padding: 10px; border-radius: 10px; box-sizing: border-box; font-size: 14px; margin-bottom: 12px; }
+        input:focus { outline: none; border-color: #0f4; box-shadow: 0 0 5px rgba(0,255,68,0.3); }
         label { font-size: 13px; font-family: monospace; color: #88cc88; display: block; margin-bottom: 4px; }
-        button { width: 100%; padding: 12px; background: #0f4; color: #000; font-weight: bold; border: none; cursor: pointer; border-radius: 10px; font-size: 14px; margin-top: 10px; }
+        button[type="submit"] { width: 100%; padding: 14px; background: #0f4; color: #000; font-weight: bold; border: none; cursor: pointer; border-radius: 12px; font-size: 15px; margin-top: 5px; }
+        button[type="submit"]:hover { background: #0cc53; }
         </style></head><body>
         <div class="panel">
             <a href="/" class="close-btn">[X]</a>
-            <h2>Server Settings & Integrations</h2>
+            <h2>Server Settings</h2>
             
             <div class="warning-box">
-                ⚠️ <b>NOTICE:</b> You must stop and restart the script for token or ID changes to take effect!
+                ⚠️ <b>NOTICE:</b> You must stop and restart the script for token or interval changes to take effect!
             </div>
 
             <form method="POST">
-                <label>Discord Bot Token:</label>
-                <input name="bot_token" value="{{ config.bot_token }}" autocomplete="off">
-                
-                <label>Admin Webhook URL (#server-alerts):</label>
-                <input name="webhook_url" value="{{ config.webhook_url }}" autocomplete="off">
-                
-                <label>Status Voice Channel ID:</label>
-                <input name="vc_status" value="{{ config.vc_status }}" autocomplete="off">
-                
-                <label>Players Voice Channel ID:</label>
-                <input name="vc_players" value="{{ config.vc_players }}" autocomplete="off">
-                
-                <label>Cloudflare Tunnel Token:</label>
-                <input name="cf_token" value="{{ config.cf_token }}" autocomplete="off">
-                
-                <label>Ban Matrix Security Code (Leave blank to keep current):</label>
-                <input type="password" name="ban_code" placeholder="••••••••" autocomplete="off">
-                
-                <label>Change Web Dashboard Password (Leave blank to keep current):</label>
-                <input type="password" name="new_admin_pw" placeholder="New Password..." autocomplete="off">
-                
-                <hr style="border: 0; border-top: 1px solid #0f44; margin: 20px 0;">
-                <h3 style="color: #0f4; font-size: 15px; margin-bottom: 10px; text-align: center;">Add New Admin Account</h3>
-                
-                <label>New Admin Username:</label>
-                <input name="new_admin_user" placeholder="Username..." autocomplete="off">
-                
-                <label>New Admin Password:</label>
-                <input type="password" name="new_admin_pass" placeholder="Password..." autocomplete="off">
+                <!-- ENGINE & AUTOMATION SECTION -->
+                <div class="section-card">
+                    <div class="section-title">Engine & Automation</div>
+                    
+                    <label>Cloudflare Tunnel Token:</label>
+                    <input name="cf_token" value="{{ config.cf_token }}" autocomplete="off">
+                    
+                    <div style="display: flex; gap: 12px;">
+                        <div style="flex: 1;">
+                            <label>Restart Interval (Hours):</label>
+                            <input name="restart_hours" value="{{ config.restart_hours }}" autocomplete="off">
+                        </div>
+                        <div style="flex: 1;">
+                            <label>Backup Interval (Hours):</label>
+                            <input name="backup_hours" value="{{ config.backup_hours }}" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SECURITY & ACCESS SECTION -->
+                <div class="section-card">
+                    <div class="section-title">Security & Access Control</div>
+                    
+                    <label>Ban Matrix Security Code (Leave blank to keep current):</label>
+                    <input type="password" name="ban_code" placeholder="••••••••" autocomplete="off">
+                    
+                    <label>Change Web Dashboard Password (Leave blank to keep current):</label>
+                    <input type="password" name="new_admin_pw" placeholder="New Password..." autocomplete="off">
+                </div>
+
+                <!-- ADD ADMIN ACCOUNT SECTION -->
+                <div class="section-card">
+                    <div class="section-title">Add New Admin Account</div>
+                    
+                    <label>New Admin Username:</label>
+                    <input name="new_admin_user" placeholder="Username..." autocomplete="off">
+                    
+                    <label>New Admin Password:</label>
+                    <input type="password" name="new_admin_pass" placeholder="Password..." autocomplete="off">
+                </div>
                 
                 <button type="submit">SAVE CHANGES</button>
             </form>
@@ -2230,11 +2502,9 @@ def manage_settings():
         """,
         banner=BACKGROUND_URL,
         config={
-            "bot_token": os.getenv("DISCORD_BOT_TOKEN", ""),
-            "webhook_url": os.getenv("ADMIN_WEBHOOK_URL", ""),
-            "vc_status": os.getenv("VC_STATUS_ID", "0"),
-            "vc_players": os.getenv("VC_PLAYERS_ID", "0"),
             "cf_token": os.getenv("CLOUDFLARE_TUNNEL_TOKEN", ""),
+            "restart_hours": os.getenv("RESTART_INTERVAL_HOURS", "6"),
+            "backup_hours": os.getenv("BACKUP_INTERVAL_HOURS", "24"),
             "ban_code": "",
         },
     )
@@ -2282,7 +2552,7 @@ def server_status():
 def stats():
   if not session.get("logged_in"):
     return jsonify({"error": "Unauthorized"}), 401
-  global ONLINE_PLAYERS
+  global ONLINE_PLAYERS, backup_timer_start
   uptime = (
       str(datetime.now() - start_time).split(".")[0]
       if start_time
@@ -2290,21 +2560,21 @@ def stats():
   )
 
   now = datetime.now()
-  target_hours = [2, 8, 14, 20]
+  try:
+    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+    interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
+    backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
+  except Exception:
+    interval_hours = 6.0
+    backup_interval_hours = 24.0
 
-  next_target = None
-  for h in target_hours:
-    candidate = now.replace(hour=h, minute=0, second=0, microsecond=0)
-    if candidate > now:
-      next_target = candidate
-      break
-  if not next_target:
-    next_target = (now + timedelta(days=1)).replace(
-        hour=2, minute=0, second=0, microsecond=0
-    )
-
-  remaining = next_target - now
+  next_target = restart_timer_start + timedelta(hours=interval_hours)
+  remaining = next_target - now if next_target > now else timedelta(0)
   restart_in = str(remaining).split(".")[0]
+
+  next_backup_target = backup_timer_start + timedelta(hours=backup_interval_hours)
+  backup_remaining = next_backup_target - now if next_backup_target > now else timedelta(0)
+  backup_in = str(backup_remaining).split(".")[0]
 
   with state_lock:
     if is_running:
@@ -2324,6 +2594,7 @@ def stats():
       "uptime": uptime,
       "status": "ONLINE" if is_running else "OFFLINE",
       "restart_in": restart_in,
+      "backup_in": backup_in,
       "players": players_str,
   })
 
@@ -2397,6 +2668,11 @@ def logout():
 def home():
   if not session.get("logged_in"):
     return redirect(url_for("login"))
+
+  session.pop("settings_unlocked", None)
+  session.pop("properties_unlocked", None)
+  session.pop("discord_unlocked", None)
+
   if is_restarting:
     return render_template_string(
         """<body style="background:#000;color:#f44;text-align:center;padding-top:100px;font-family:monospace;"><h1>REBOOTING</h1><div style="font-size:80px;">{{s}}</div><script>setInterval(()=>location.reload(),5000)</script></body>""",
@@ -2615,10 +2891,28 @@ def home():
             <button class="dropbtn">ADMIN TOOLS ▼</button>
             <div class="dropdown-content">
                 <div class="dropdown-inner">
+                    <!-- Monitoring & Tools -->
+                    <div style="padding: 8px 16px 2px 16px; font-size: 10px; font-family: monospace; color: #0f48; letter-spacing: 1px;">MONITORING</div>
                     <button type="button" onclick="openMetricsModal()">View Graphs</button>
                     <button type="button" onclick="openNotesModal()">Admin Notes</button>
+                    
+                    <hr style="border:0; border-top:1px solid #0f42; margin:4px 0;">
+                    
+                    <!-- Server Management -->
+                    <div style="padding: 6px 16px 2px 16px; font-size: 10px; font-family: monospace; color: #0f48; letter-spacing: 1px;">MANAGEMENT</div>
                     <a href="/bans">Manage Bans</a>
+                    <a href="/properties">Server Properties</a>
                     <a href="/settings">Server Settings</a>
+
+                    <hr style="border:0; border-top:1px solid #0f42; margin:4px 0;">
+                    
+                    <!-- Integrations -->
+                    <div style="padding: 6px 16px 2px 16px; font-size: 10px; font-family: monospace; color: #0f48; letter-spacing: 1px;">INTEGRATIONS</div>
+                    <a href="/discord">Discord Integration</a>
+
+                    <hr style="border:0; border-top:1px solid #0f42; margin:4px 0;">
+                    
+                    <!-- Support -->
                     <button type="button" onclick="openContactModal()">Contact & Support</button>
                 </div>
             </div>
@@ -2635,6 +2929,7 @@ def home():
                 <span>RAM: <b id="ram">...</b></span>
                 <span>DISK: <b id="disk">...</b></span>
                 <span style="color:#0ff">RST IN: <b id="rst">...</b></span>
+                <span style="color:#ff00ff">BCK UP: <b id="bck">...</b></span>
             </div>
             <div class="stats-row-center">
                 <span>PLAYERS: <b id="players">...</b></span>
@@ -2720,7 +3015,7 @@ def home():
             <h3 style="color:#0f4; margin-top:0;">Support & Contact</h3>
             <p style="color:#ffcc00; font-size:13px; font-family:monospace; line-height:1.5;">
                 <b>Creator:</b> Nutcrustys420<br>
-                <b>Community:</b> Stonercraft420<br><br>
+                <b>Community:</b> BedrockNode<br><br>
                 Need help, want to report an issue, or check for updates? Join our community Discord server:
             </p>
             <a href="https://discord.gg/aSVPbEpkuA" target="_blank" style="display:block; background:#003322; color:#00ff66; padding:12px; border-radius:10px; text-decoration:none; font-weight:bold; font-family:monospace; margin-bottom:15px; border:1px solid #0f44;">[ Open Support Discord ]</a>
@@ -2796,6 +3091,7 @@ def home():
         document.getElementById('disk').innerText = d.disk;
         document.getElementById('players').innerText = d.players;
         document.getElementById('rst').innerText = d.restart_in;
+        document.getElementById('bck').innerText = d.backup_in;
     });
 
     socket.on('console_log', (data) => {
