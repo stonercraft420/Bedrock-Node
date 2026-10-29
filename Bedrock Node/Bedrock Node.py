@@ -16,6 +16,7 @@ import asyncio
 import sys
 import platform
 import stat
+import serial
 
 import colorama
 import secrets
@@ -48,6 +49,7 @@ else:
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SERVER_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+IMAGES_DIR = os.path.join(SCRIPT_DIR, "images")
 PROPERTIES_FILE = os.path.join(SERVER_DIR, "server.properties")
 DATA_DIR = os.path.join(SCRIPT_DIR, "server_vault")
 if not os.path.exists(DATA_DIR):
@@ -55,10 +57,22 @@ if not os.path.exists(DATA_DIR):
 
 load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
 
+VERSION = "1.0.3"
+CURRENT_VERSION = "1.0.3"
+LATEST_VERSION = "1.0.3"
+UPDATE_AVAILABLE = False
+
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 ADMIN_WEBHOOK_URL = os.getenv("ADMIN_WEBHOOK_URL", "").strip()
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "default_secret_key")
 BAN_SECRET_CODE = os.getenv("BAN_SECRET_CODE", "BAN")
+SERIAL_PORT = os.getenv("SERIAL_PORT", "COM3")
+SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", 19200))
+TOTAL_AH = float(os.getenv("TOTAL_AH", 1120))
+MAX_V = float(os.getenv("MAX_V", 12.80))
+GEN_ALARM_V = float(os.getenv("GEN_ALARM_V", 12.35))
+SHUTDOWN_V = float(os.getenv("SHUTDOWN_V", 11.50))
+CHARGE_DETECT_V = float(os.getenv("CHARGE_DETECT_V", 13.60))
 
 DISCORD_ENABLED = bool(DISCORD_BOT_TOKEN)
 WEBHOOK_ENABLED = bool(ADMIN_WEBHOOK_URL)
@@ -82,7 +96,7 @@ G, W, R, Y, C, B, PURPLE, END = (
 
 colorama.init(autoreset=True)
 
-app = Flask(__name__, static_folder='images', static_url_path='/images')
+app = Flask(__name__, static_folder=IMAGES_DIR, static_url_path='/images')
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "default_secret_key")
 
 cookie_secure_setting = os.getenv("COOKIE_SECURE", "False").lower() == "true"
@@ -337,13 +351,43 @@ last_backup_date = None
 is_backing_up = False
 ONLINE_PLAYERS = set()
 CHART_CACHE = {}
+next_restart_target = None
+next_backup_target = None
 
 intents = discord.Intents.default()
 intents.guilds = True
 discord_client = discord.Client(intents=intents)
 
+def parse_version(v_str):
+  cleaned = re.sub(r"[^0-9.]", "", v_str)
+  try:
+    return tuple(map(int, cleaned.split(".")))
+  except ValueError:
+    return (0, 0, 0)
+
+
+def check_for_updates():
+  global UPDATE_AVAILABLE, LATEST_VERSION
+
+  try:
+    url = "https://api.github.com/repos/stonercraft420/Bedrock-Node/releases/latest"
+    req = urllib.request.Request(url, headers={"User-Agent": "BedrockNode"})
+    with urllib.request.urlopen(req, timeout=5) as response:
+      data = json.loads(response.read().decode())
+      tag_name = data.get("tag_name", "").lstrip("v") # Strips a leading 'v' if your tags are like 'v1.0.4'
+
+      LATEST_VERSION = tag_name
+      remote_ver = parse_version(tag_name)
+      local_ver = parse_version(CURRENT_VERSION)
+
+      if remote_ver > local_ver:
+        UPDATE_AVAILABLE = True
+      else:
+        UPDATE_AVAILABLE = False
+  except Exception as e:
+    print(f"Update check failed: {e}")
+
 def start_playit_process():
-  """Spawns playit as a background process cross-platform."""
   os_type = platform.system().lower()
   filename = "playit.exe" if os_type == "windows" else "playit"
   playit_path = os.path.abspath(os.path.join(DATA_DIR, filename))
@@ -368,7 +412,6 @@ def start_playit_process():
       print(f"{R}[PLAYIT ERROR] Could not launch playit: {e}{END}")
 
 def download_cloudflared():
-  """Detects OS and downloads the official cloudflared binary automatically."""
   os_type = platform.system().lower()
 
   if os_type == "windows":
@@ -416,7 +459,6 @@ def download_cloudflared():
 
 
 def start_cloudflare_process():
-  """Spawns Cloudflare Tunnel if a token is present in environment."""
   token = os.getenv("CLOUDFLARE_TUNNEL_TOKEN", "").strip()
   if not token:
     return
@@ -445,7 +487,7 @@ def start_cloudflare_process():
 
 def run_desktop_wizard(data_dir):
     root = tk.Tk()
-    root.title("Bedrock Node Hub - Setup Wizard")
+    root.title("Bedrock Node - Setup Wizard")
     root.geometry("620x560")
     root.configure(bg="#000c00")
 
@@ -492,7 +534,7 @@ def run_desktop_wizard(data_dir):
             
             
             try:
-                vault_shortcut = os.path.join(data_dir, "Bedrock Node Hub.url")
+                vault_shortcut = os.path.join(data_dir, "Bedrock Node.url")
                 with open(vault_shortcut, "w", encoding="utf-8") as sf:
                     sf.write("[InternetShortcut]\nURL=http://localhost:5000\n")
 
@@ -503,7 +545,7 @@ def run_desktop_wizard(data_dir):
                     if onedrive_path and os.path.exists(os.path.join(onedrive_path, "Desktop")):
                         desktop = os.path.join(onedrive_path, "Desktop")
                 
-                desktop_shortcut = os.path.join(desktop, "Bedrock Node Hub.url")
+                desktop_shortcut = os.path.join(desktop, "Bedrock Node.url")
                 with open(desktop_shortcut, "w", encoding="utf-8") as sf:
                     sf.write("[InternetShortcut]\nURL=http://localhost:5000\n")
             except Exception:
@@ -536,7 +578,7 @@ def run_desktop_wizard(data_dir):
             flask_secret = secrets.token_hex(32)
 
             env_content = (
-                "# --- BEDROCK NODE CONFIGURATION ---\n"
+                "# --- Stoner CONFIGURATION ---\n"
                 f"USE_PLAYIT={'True' if use_playit else 'False'}\n"
                 f"CLOUDFLARE_TUNNEL_TOKEN={state['cf_token'].get().strip()}\n\n"
                 f"DISCORD_BOT_TOKEN={state['bot_token'].get().strip()}\n"
@@ -558,7 +600,7 @@ def run_desktop_wizard(data_dir):
             current_step = None
 
             root.destroy()
-            open_as_app("http://localhost:5000")
+            threading.Thread(target=lambda: (time.sleep(2), open_as_app("http://localhost:5000")), daemon=True).start()
 
     def prev_action():
         step = current_step.get()
@@ -583,7 +625,7 @@ def run_desktop_wizard(data_dir):
         next_btn.config(text="SAVE & LAUNCH NODE" if step == 6 else "NEXT >", command=next_action)
 
         if step == 1:
-            tk.Label(container, text="[Step 1 of 6] Welcome to Bedrock Node Hub!", fg=accent_color, bg=bg_color, font=("Courier", 11, "bold")).pack(anchor="w", pady=(0, 5))
+            tk.Label(container, text="[Step 1 of 6] Welcome to Bedrock Node!", fg=accent_color, bg=bg_color, font=("Courier", 11, "bold")).pack(anchor="w", pady=(0, 5))
             
             welcome_text = (
                 "Hello! This wizard will quickly configure your Minecraft Bedrock\n"
@@ -903,6 +945,7 @@ def run_desktop_wizard(data_dir):
     render_step()
     root.mainloop()
 
+
 def get_notes():
   with notes_lock:
     try:
@@ -922,7 +965,6 @@ def get_server_properties():
 
 
 def load_blacklist():
-  """Loads blacklisted players safely using a thread lock."""
   with blacklist_lock:
     if not os.path.exists(BLACKLIST_FILE):
       return {}
@@ -935,7 +977,6 @@ def load_blacklist():
 
 
 def save_blacklist(blacklist_dict):
-  """Saves blacklisted players safely using a thread lock."""
   with blacklist_lock:
     try:
       with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
@@ -945,7 +986,6 @@ def save_blacklist(blacklist_dict):
 
 
 def send_admin_alert(message):
-  """Pushes logs to the Admin Discord text channel if enabled."""
   if not WEBHOOK_ENABLED or not ADMIN_WEBHOOK_URL:
     return 
 
@@ -984,7 +1024,8 @@ async def update_discord_stats():
     with state_lock:
       p_count = len(ONLINE_PLAYERS) if is_running else 0
 
-    players_text = f"{p_count} / 30" if is_running else "0 / 30"
+    max_p = get_max_players()
+    players_text = f"{p_count} / {max_p}" if is_running else f"0 / {max_p}"
     status_name = "🟢 Status: Online" if is_running else "🔴 Status: Offline"
     players_name = f"👥 Players: {players_text}"
 
@@ -1010,9 +1051,18 @@ async def update_discord_stats():
   except Exception as e:
     print(f"Discord Stat Update Error: {e}")
 
+def get_max_players():
+  try:
+    if os.path.exists(PROPERTIES_FILE):
+      with open(PROPERTIES_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+          if line.strip().startswith("max-players="):
+            return int(line.split("=", 1)[1].strip())
+  except Exception:
+    pass
+  return 30
 
 def run_discord_bot():
-  """Runs the Discord stats bot if a valid token is provided."""
   if not DISCORD_ENABLED or not DISCORD_BOT_TOKEN:
     print(f"{C}[INFO] Discord Bot disabled (no DISCORD_BOT_TOKEN set).{END}")
     return
@@ -1024,33 +1074,61 @@ def run_discord_bot():
 
 
 def restart_timer():
-  """Restarts the server based on a configurable hourly interval."""
-  global restart_timer_start
-  while True:
-    try:
-      load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-      interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
-    except Exception:
-      interval_hours = 6.0
+    global next_restart_target
+    while True:
+        try:
+            load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+            interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
+            start_time_str = os.getenv("RESTART_START_TIME", "").strip()
+        except Exception:
+            interval_hours = 6.0
+            start_time_str = ""
 
-    elapsed = datetime.now() - restart_timer_start
-    if elapsed >= timedelta(hours=interval_hours):
-      send_to_mc(
-          f"say Server restarting in 1 minute ({interval_hours}-hour cycle) find a safe spot",
-          "SYSTEM",
-      )
-      time.sleep(60)
-      send_to_mc("stop", "AUTORESTART")
+        now = datetime.now()
+        target = None
 
-      restart_timer_start = datetime.now()
-      time.sleep(65)
+        if start_time_str and ":" in start_time_str:
+            try:
+                parts = start_time_str.split(":")
+                target_hour = int(parts[0])
+                target_minute = int(parts[1])
+                
+                target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                
+                while target <= now:
+                    target += timedelta(hours=interval_hours)
+            except ValueError:
+                target = None
 
-    time.sleep(30)
+        if not target:
+            current_hour = now.hour + (now.minute / 60.0)
+            next_hour_mark = ((int(current_hour // interval_hours) + 1) * interval_hours)
+            if next_hour_mark >= 24:
+                target = (now + timedelta(days=1)).replace(hour=int(next_hour_mark % 24), minute=0, second=0, microsecond=0)
+            else:
+                target = now.replace(hour=int(next_hour_mark), minute=0, second=0, microsecond=0)
+        with state_lock:
+            next_restart_target = target
+
+        sleep_seconds = (target - now).total_seconds()
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+        send_to_mc(
+            f"say Server restarting in 1 minute (Scheduled cycle at {target.strftime('%H:%M')}) find a safe spot",
+            "SYSTEM",
+        )
+        time.sleep(60)
+        send_to_mc("stop", "AUTORESTART")
+        time.sleep(65)
 
 
 def hourly_metrics_logger():
-  """Creates a monthly archive folder, logs player counts, and aligns logging to top-of-the-hour marks."""
   archive_dir = os.path.join(DATA_DIR, "metrics_archive")
+
+  now = datetime.now()
+  next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+  time.sleep((next_hour - now).total_seconds())
 
   while True:
     try:
@@ -1058,9 +1136,7 @@ def hourly_metrics_logger():
         os.makedirs(archive_dir)
 
       current_month_str = datetime.now().strftime("%Y-%m")
-      log_file_path = os.path.join(
-          archive_dir, f"metrics_{current_month_str}.csv"
-      )
+      log_file_path = os.path.join(archive_dir, f"metrics_{current_month_str}.csv")
 
       needs_header = (
           not os.path.exists(log_file_path)
@@ -1068,13 +1144,14 @@ def hourly_metrics_logger():
       )
 
       p_count = len(ONLINE_PLAYERS) if is_running else 0
+      server_status = 1 if is_running else 0
       timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
       with open(log_file_path, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if needs_header:
-          writer.writerow(["Timestamp", "Player_Count"])
-        writer.writerow([timestamp, p_count])
+          writer.writerow(["Timestamp", "Player_Count", "Server_Status"])
+        writer.writerow([timestamp, p_count, server_status])
 
     except Exception as e:
       print(f"Hourly metrics log error: {e}")
@@ -1086,9 +1163,7 @@ def hourly_metrics_logger():
     sleep_seconds = (next_hour - now).total_seconds()
     time.sleep(sleep_seconds)
 
-
 def load_accounts():
-  """Loads admin credentials from secureaccounts.json."""
   if os.path.exists(ACCOUNTS_FILE):
     try:
       with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
@@ -1104,7 +1179,6 @@ ACCOUNTS = load_accounts()
 
 
 def log_admin_event(event_type, username, ip_address="Local"):
-  """Logs admin logins/logouts to a .txt file and prints directly to console."""
   try:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = (
@@ -1124,7 +1198,6 @@ def log_admin_event(event_type, username, ip_address="Local"):
 
 
 def track_unique_player(player_name, xuid):
-  """Tracks unique players by their permanent XUID."""
   with unique_players_lock:
     try:
       if os.path.exists(UNIQUE_PLAYERS_FILE):
@@ -1159,7 +1232,6 @@ def track_unique_player(player_name, xuid):
 
 
 def load_unique_player_dates():
-  """Loads all first-join timestamps from unique players storage."""
   unique_dates = []
   with unique_players_lock:
     if os.path.exists(UNIQUE_PLAYERS_FILE):
@@ -1199,68 +1271,93 @@ def backup_world():
           ">> World backup copy completed successfully:"
           f" world_backup_{timestamp}"
       )
-      cleanup_old_backups(backup_dir, days_to_keep=3)
+      cleanup_old_backups(backup_dir, max_backups=1)
     except Exception as e:
       print(f">> Backup failed: {e}")
   else:
     print(f">> Backup failed: 'worlds' folder not found at {world_path}")
 
 
-def cleanup_old_backups(backup_dir, days_to_keep=3):
+def cleanup_old_backups(backup_dir, max_backups=1):
   try:
-    now = time.time()
-    cutoff_seconds = days_to_keep * 86400
-
+    backups = []
     for folder_name in os.listdir(backup_dir):
       folder_path = os.path.join(backup_dir, folder_name)
       if os.path.isdir(folder_path) and folder_name.startswith("world_backup_"):
-        folder_mtime = os.path.getmtime(folder_path)
-        if (now - folder_mtime) > cutoff_seconds:
-          shutil.rmtree(folder_path)
-          print(
-              f">> Purged old backup: {folder_name} (older than"
-              f" {days_to_keep} days)"
-          )
+        timestamp_str = folder_name.replace("world_backup_", "")
+        backups.append((folder_path, timestamp_str, folder_name))
+
+    backups.sort(key=lambda x: x[1])
+
+    while len(backups) > max_backups:
+      oldest_path, _, oldest_name = backups.pop(0)
+      shutil.rmtree(oldest_path)
+      print(f">> Purged excess backup: {oldest_name} (Exceeded max limit of {max_backups})")
   except Exception as e:
     print(f">> Error cleaning up old backups: {e}")
 
 
 def nightly_backup_scheduler():
-  global needs_backup, last_backup_date, mc_process, is_backing_up, backup_timer_start
+    global mc_process, is_backing_up, next_backup_target
 
-  while True:
-    try:
-      load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-      backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
-    except Exception:
-      backup_interval_hours = 24.0
+    while True:
+        try:
+            load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+            backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
+            backup_start_time_str = os.getenv("BACKUP_START_TIME", "").strip()
+        except Exception:
+            backup_interval_hours = 24.0
+            backup_start_time_str = ""
 
-    elapsed = datetime.now() - backup_timer_start
-    if elapsed >= timedelta(hours=backup_interval_hours):
-      is_backing_up = True
+        now = datetime.now()
+        target = None
 
-      print("Initiating scheduled backup sequence...")
-      send_to_mc(
-          "say Server backing up in 5 minutes for scheduled maintenance.",
-          "SYSTEM",
-      )
-      time.sleep(270)
-      send_to_mc(
-          "say Server backing up in 30 seconds! Find a safe spot...",
-          "SYSTEM",
-      )
-      time.sleep(30)
-      send_to_mc("stop", "SYSTEM")
+        if backup_start_time_str and ":" in backup_start_time_str:
+            try:
+                parts = backup_start_time_str.split(":")
+                target_hour = int(parts[0])
+                target_minute = int(parts[1])
+                
+                target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
 
-      if mc_process:
-        mc_process.wait()
+                while target <= now:
+                    target += timedelta(hours=backup_interval_hours)
+            except ValueError:
+                target = None
 
-      time.sleep(5)
-      backup_world()
-      is_backing_up = False
-      backup_timer_start = datetime.now()
+        if not target:
+            target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
 
-    time.sleep(60)
+        with state_lock:
+            next_backup_target = target
+
+        sleep_seconds = (target - now).total_seconds()
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+        is_backing_up = True
+        print(f"Initiating scheduled backup sequence (Scheduled for {target.strftime('%Y-%m-%d %H:%M')})...")
+        send_to_mc(
+            "say Server backing up in 5 minutes for scheduled maintenance.",
+            "SYSTEM",
+        )
+        time.sleep(270)
+        send_to_mc(
+            "say Server backing up in 30 seconds! Find a safe spot...",
+            "SYSTEM",
+        )
+        time.sleep(30)
+        send_to_mc("stop", "SYSTEM")
+
+        if mc_process:
+            mc_process.wait()
+
+        time.sleep(5)
+        backup_world()
+        is_backing_up = False
+        time.sleep(120)
 
 
 def send_to_mc(cmd, source="SYSTEM", silent=False):
@@ -1286,11 +1383,14 @@ def send_to_mc(cmd, source="SYSTEM", silent=False):
         except Exception as e:
           print(f"Log Error: {e}")
 
+        line_to_log = f"[{t}] {entry}"
+        formatted_line = colorize_log(line_to_log)
+
         with state_lock:
-          last_actions.append(
-              f'<span style="color: #d8bfd8;">[{t}] {entry}</span>'
-          )
+          last_actions.append(formatted_line)
           last_actions = last_actions[-500:]
+
+        socketio.emit("console_log", {"line": formatted_line})
 
         if source != "CONSOLE":
           print(f" {PURPLE}>>{END} {W}{source}{END}: {PURPLE}{cmd}{END}")
@@ -1311,22 +1411,14 @@ def stdout_reader():
     clean = re.sub(r"^\x1b\[[0-9;]*m", "", raw_msg)
 
     skip_web_keywords = [
-        "Session ID:",
-        "Build ID:",
-        "Branch:",
-        "Commit ID:",
-        "Configuration:",
-        "Level Name:",
-        "Profiler config",
-        "No CDN config file",
-        "Content logging to console",
-        "Opening level",
-        "Accepting clients",
-        "Pack Stack",
-        "Signed in to signaling",
-        "Server started.",
-        "Allow list is enabled",
-        "Server Telemetry",
+        "Session ID:", "Build ID:", "Branch:", 
+        "Commit ID:", "Configuration:", "Level Name:", 
+        "Profiler config", "No CDN config file",
+        "Content logging to console", "Opening level",
+        "Accepting clients", "Pack Stack", "Signed in to signaling",
+        "Server started.", "Allow list is enabled", "Server Telemetry",
+        "Contents of server.properties", "Version:", "Game mode:", 
+        "Difficulty:", "Content logging to disk is enabled", "TELEMETRY MESSAGE"
     ]
     should_skip_web = any(
         keyword.lower() in clean.lower() for keyword in skip_web_keywords
@@ -1422,7 +1514,17 @@ def stdout_reader():
         except Exception as e:
           print(f"Player parse error: {e}")
       else:
-        if "error" in clean.lower() or "exception" in clean.lower():
+        if "contents of server.properties:" in clean.lower():
+          try:
+            parts = clean.split("Contents of server.properties:", 1)
+            prefix = parts[0]
+            prop_json = json.loads(parts[1].strip())
+            print(f"{prefix}Contents of server.properties:")
+            for k, v in prop_json.items():
+              print(f"  {C}• {k}:{END} {W}{v}{END}")
+          except Exception:
+            print(clean)
+        elif "error" in clean.lower() or "exception" in clean.lower():
           print(f"{R}{clean}{END}")
         else:
           print(clean)
@@ -1458,8 +1560,7 @@ def stdout_reader():
 
 
 def websocket_stats_broadcaster():
-  """Pushes server stats to all connected web clients every few seconds."""
-  global backup_timer_start
+  global backup_timer_start, next_restart_target, next_backup_target
   while True:
     time.sleep(3)
     try:
@@ -1470,20 +1571,30 @@ def websocket_stats_broadcaster():
       )
 
       now = datetime.now()
-      try:
-        load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-        interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
-        backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
-      except Exception:
-        interval_hours = 6.0
-        backup_interval_hours = 24.0
 
-      next_target = restart_timer_start + timedelta(hours=interval_hours)
-      remaining = next_target - now if next_target > now else timedelta(0)
+      with state_lock:
+          current_target = next_restart_target
+
+      if current_target and current_target > now:
+          remaining = current_target - now
+      else:
+          remaining = timedelta(0)
       restart_in = str(remaining).split(".")[0]
 
-      next_backup_target = backup_timer_start + timedelta(hours=backup_interval_hours)
-      backup_remaining = next_backup_target - now if next_backup_target > now else timedelta(0)
+      try:
+        load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+        backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
+      except Exception:
+        backup_interval_hours = 24.0
+
+      with state_lock:
+          current_backup_target = next_backup_target
+
+      if current_backup_target and current_backup_target > now:
+          backup_remaining = current_backup_target - now
+      else:
+          backup_remaining = timedelta(0)
+          
       backup_in = str(backup_remaining).split(".")[0]
 
       with state_lock:
@@ -1502,6 +1613,8 @@ def websocket_stats_broadcaster():
           "restart_in": restart_in,
           "backup_in": backup_in,
           "players": players_str,
+          "update_available": UPDATE_AVAILABLE,
+          "latest_version": LATEST_VERSION,
       }
 
       socketio.emit("update_stats", stats_payload)
@@ -1509,7 +1622,6 @@ def websocket_stats_broadcaster():
       pass
 
 def open_as_app(url):
-    """Opens the URL as a standalone app window with an isolated profile so Windows maps the taskbar icon correctly."""
     os_type = platform.system().lower()
     opened = False
     
@@ -1559,7 +1671,6 @@ def open_as_app(url):
         webbrowser.open(url)
 
 def local_console_bridge():
-  """Reads input typed directly into the local server command prompt."""
   global is_running
   while True:
     if is_running:
@@ -1575,18 +1686,23 @@ def local_console_bridge():
 
 def colorize_log(line):
   clean_line = html.escape(line.strip())
+  
   if "Player connected:" in clean_line or "joined the game" in clean_line:
     return f'<span style="color: #55FF55; font-weight: bold;">{clean_line}</span>'
   elif "Player disconnected:" in clean_line or "left the game" in clean_line:
     return f'<span style="color: #FF5555; font-weight: bold;">{clean_line}</span>'
-  elif "WARN" in clean_line or "WARNING" in clean_line:
+  elif "WARN" in clean_line or "WARNING" in clean_line or "ALLOW LIST WARNING" in clean_line:
     return f'<span style="color: #FFFF55;">{clean_line}</span>'
-  elif "ERROR" in clean_line or "Unknown command" in clean_line:
+  elif "ERROR" in clean_line or "exception" in clean_line.lower() or "Unknown command" in clean_line or "No targets matched selector" in clean_line:
     return f'<span style="color: #FF5555;">{clean_line}</span>'
-  elif "CONSOLE:" in clean_line or "&gt;&gt;" in clean_line:
+  elif "SYSTEM" in clean_line or "backing up" in clean_line or "Initiating scheduled backup" in clean_line:
+    return f'<span style="color: #FF77FF; font-weight: bold;">{clean_line}</span>'
+  elif "CONSOLE:" in clean_line or "&gt;&gt;" in clean_line or re.match(r"^\[\d{2}:\d{2}:\d{2}\]\s+[A-Za-z0-9_]+:", clean_line):
+    if any(cmd_keyword in clean_line for cmd_keyword in ["testfor", "say", "kick", "ban", "stop"]):
+      return f'<span style="color: #FF5555;">{clean_line}</span>'
     return f'<span style="color: #D8BFD8;">{clean_line}</span>'
   elif "INFO" in clean_line:
-    return f'<span style="color: #CCCCCC;">{clean_line}</span>'
+    return f'<span style="color: #AAAAAA;">{clean_line}</span>'
   else:
     return f'<span style="color: #00FF00;">{clean_line}</span>'
 
@@ -1632,7 +1748,7 @@ def server_manager():
 
         bar_len = max(40, min(term_width - 2, 105))
         divider = "=" * bar_len
-        title = "BEDROCK NODE HUB (v1.0.1)"
+        title = "BEDROCK NODE HUB"
 
         print(f"{G}{B}{divider}{END}")
         print(f"{G}{B}{title:^{bar_len}}{END}")
@@ -1672,7 +1788,7 @@ def server_manager():
         time.sleep(8)
         is_running, start_time = True, datetime.now()
 
-        send_admin_alert("🟢 **SERVER STATUS:** Bedrock Node is now **ONLINE**.")
+        send_admin_alert("🟢 **SERVER STATUS:** The Server is now **ONLINE**.")
 
         mc_process.wait()
         if mc_process.stdin:
@@ -1683,7 +1799,7 @@ def server_manager():
         is_running, is_restarting, start_time = False, True, None
         ONLINE_PLAYERS.clear()
 
-        send_admin_alert("🔴 **SERVER STATUS:** Bedrock Node went **OFFLINE**.")
+        send_admin_alert("🔴 **SERVER STATUS:** The Server went **OFFLINE**.")
 
         if is_backing_up:
             print(
@@ -1710,7 +1826,6 @@ def server_manager():
 
 
 def load_metrics_data():
-  """Loads and parses all monthly CSV logs safely (supporting 2 or 3 columns)."""
   archive_dir = os.path.join(DATA_DIR, "metrics_archive")
   parsed_rows = []
 
@@ -1723,15 +1838,39 @@ def load_metrics_data():
       try:
         with open(file_path, mode="r", encoding="utf-8") as f:
           reader = csv.reader(f)
-          header = next(reader, None)
           for row in reader:
-            if len(row) >= 2:
+            if not row or len(row) < 2:
+              continue
+            
+            dt_str = row[0].strip()
+            dt_obj = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
               try:
-                dt_str, p_count = row[0].strip(), int(row[1])
-                dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-                parsed_rows.append((dt_obj, p_count))
-              except (ValueError, IndexError):
+                dt_obj = datetime.strptime(dt_str, fmt)
+                break
+              except ValueError:
                 continue
+            
+            if not dt_obj:
+              continue
+
+            try:
+              p_count = int(float(row[1].strip()))
+            except (ValueError, TypeError):
+              continue
+
+            server_status = 1 if p_count > 0 else 0
+            if len(row) >= 3:
+              for col_val in row[2:]:
+                col_val_str = col_val.strip()
+                if col_val_str in ("0", "1"):
+                  try:
+                    server_status = int(col_val_str)
+                    break
+                  except ValueError:
+                    pass
+
+            parsed_rows.append((dt_obj, p_count, server_status))
       except Exception as e:
         print(f"Error reading metrics file {filename}: {e}")
 
@@ -1740,16 +1879,15 @@ def load_metrics_data():
 
 
 def filter_and_aggregate(parsed_data, view_mode, target_input):
-  """Filters data by Day, Month, or Year and aggregates player metrics appropriately."""
   if not parsed_data:
-    return [], [], []
+    return [], [], [], []
+
+  filtered = []
 
   if target_input:
     if view_mode == "Day":
       filtered = [
-          row
-          for row in parsed_data
-          if row[0].strftime("%Y-%m-%d") == target_input
+          row for row in parsed_data if row[0].strftime("%Y-%m-%d") == target_input
       ]
     elif view_mode == "Month":
       filtered = [
@@ -1764,29 +1902,33 @@ def filter_and_aggregate(parsed_data, view_mode, target_input):
     if view_mode == "Day":
       cutoff_dt = latest_dt - timedelta(days=7)
       filtered = [row for row in parsed_data if row[0] >= cutoff_dt]
+      # Fallback: if no data exists in the last 7 days, show the latest available records
+      if not filtered and parsed_data:
+        filtered = parsed_data[-168:]
     elif view_mode == "Month":
       current_month_str = latest_dt.strftime("%Y-%m")
       filtered = [
-          row
-          for row in parsed_data
-          if row[0].strftime("%Y-%m") == current_month_str
+          row for row in parsed_data if row[0].strftime("%Y-%m") == current_month_str
       ]
+      if not filtered and parsed_data:
+        filtered = parsed_data[-720:]
     elif view_mode == "Year":
       current_year_str = latest_dt.strftime("%Y")
       filtered = [
-          row
-          for row in parsed_data
-          if row[0].strftime("%Y") == current_year_str
+          row for row in parsed_data if row[0].strftime("%Y") == current_year_str
       ]
+      if not filtered and parsed_data:
+        filtered = parsed_data
 
   if not filtered:
-    return [], [], []
+    return [], [], [], []
 
   unique_dates = load_unique_player_dates()
 
   if view_mode == "Day":
     timestamps = [row[0].strftime("%Y-%m-%d %H:%M:%S") for row in filtered]
     active_players = [row[1] for row in filtered]
+    server_statuses = [row[2] for row in filtered]
 
     unique_joins = []
     for row in filtered:
@@ -1798,21 +1940,27 @@ def filter_and_aggregate(parsed_data, view_mode, target_input):
       )
       unique_joins.append(matches)
 
-    return timestamps, active_players, unique_joins
+    return timestamps, active_players, unique_joins, server_statuses
 
   elif view_mode == "Month":
     days_map = {}
-    for row in filtered:
-      dt, p_count = row[0], row[1]
+    for dt, p_count, status in filtered:
       day_str = dt.strftime("%Y-%m-%d")
       if day_str not in days_map:
-        days_map[day_str] = []
-      days_map[day_str].append(p_count)
+        days_map[day_str] = {"players": [], "statuses": []}
+      days_map[day_str]["players"].append(p_count)
+      days_map[day_str]["statuses"].append(status)
 
     sorted_days = sorted(days_map.keys())
     timestamps = [f"{d} 00:00:00" for d in sorted_days]
     active_players = [
-        round(sum(days_map[d]) / len(days_map[d]), 1) if days_map[d] else 0
+        round(sum(days_map[d]["players"]) / len(days_map[d]["players"]), 1)
+        if days_map[d]["players"]
+        else 0
+        for d in sorted_days
+    ]
+    server_statuses = [
+        1 if sum(days_map[d]["statuses"]) > 0 else 0
         for d in sorted_days
     ]
 
@@ -1822,21 +1970,27 @@ def filter_and_aggregate(parsed_data, view_mode, target_input):
       count = sum(1 for ud in unique_dates if ud.date() == d_obj.date())
       unique_joins.append(count)
 
-    return timestamps, active_players, unique_joins
+    return timestamps, active_players, unique_joins, server_statuses
 
   elif view_mode == "Year":
     months_map = {}
-    for row in filtered:
-      dt, p_count = row[0], row[1]
+    for dt, p_count, status in filtered:
       month_str = dt.strftime("%Y-%m")
       if month_str not in months_map:
-        months_map[month_str] = []
-      months_map[month_str].append(p_count)
+        months_map[month_str] = {"players": [], "statuses": []}
+      months_map[month_str]["players"].append(p_count)
+      months_map[month_str]["statuses"].append(status)
 
     sorted_months = sorted(months_map.keys())
     timestamps = [f"{m}-01 00:00:00" for m in sorted_months]
     active_players = [
-        round(sum(months_map[m]) / len(months_map[m]), 1) if months_map[m] else 0
+        round(sum(months_map[m]["players"]) / len(months_map[m]["players"]), 1)
+        if months_map[m]["players"]
+        else 0
+        for m in sorted_months
+    ]
+    server_statuses = [
+        1 if sum(months_map[m]["statuses"]) > 0 else 0
         for m in sorted_months
     ]
 
@@ -1845,57 +1999,42 @@ def filter_and_aggregate(parsed_data, view_mode, target_input):
       count = sum(1 for ud in unique_dates if ud.strftime("%Y-%m") == m_str)
       unique_joins.append(count)
 
-    return timestamps, active_players, unique_joins
+    return timestamps, active_players, unique_joins, server_statuses
 
-  return [], [], []
+  return [], [], [], []
 
 
 def generate_plot_image(
-    timestamps, active_players, unique_joins, view_mode, target_input
+    timestamps, active_players, unique_joins, server_statuses, view_mode, target_input
 ):
   if not timestamps:
     return ""
 
-  from matplotlib.figure import Figure
+  plt.rcParams.update({
+      "figure.facecolor": "#000c00",
+      "axes.facecolor": "#000c00",
+      "savefig.facecolor": "#000c00",
+      "savefig.edgecolor": "none",
+      "axes.edgecolor": "#0f44",
+      "axes.labelcolor": "#0f4",
+      "xtick.color": "#0f4",
+      "ytick.color": "#0f4",
+      "text.color": "#0f4",
+  })
 
-  fig = Figure(figsize=(10, 5), dpi=100, facecolor="#000c00")
-  ax = fig.add_subplot(111)
-  
-  ax.set_facecolor("#000c00")
-  ax.spines['bottom'].set_color('#0f44')
-  ax.spines['top'].set_color('#0f44')
-  ax.spines['left'].set_color('#0f44')
-  ax.spines['right'].set_color('#0f44')
-  ax.xaxis.label.set_color('#0f4')
-  ax.yaxis.label.set_color('#0f4')
-  ax.tick_params(axis='x', colors='#0f4')
-  ax.tick_params(axis='y', colors='#0f4')
-
+  fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
   x_indexes = np.arange(len(timestamps))
 
-  formatted_labels = []
-  for ts in timestamps:
-    try:
-      dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-      if view_mode == "Day":
-        time_str = dt.strftime("%m/%d %H:%M")
-      elif view_mode == "Month":
-        time_str = dt.strftime("%b %d")
-      else:
-        time_str = dt.strftime("%b %Y")
-      formatted_labels.append(time_str)
-    except ValueError:
-      formatted_labels.append(ts)
-
   bar_width = 0.35
-  color_p = "#00ff66"
+  
+  bar_colors = "#00ff66"
   color_u = "#ff00ff"
-
+  
   ax.bar(
       x_indexes - bar_width / 2,
       active_players,
       width=bar_width,
-      color=color_p,
+      color=bar_colors,
       alpha=0.85,
       label="Active Players",
   )
@@ -1908,51 +2047,123 @@ def generate_plot_image(
       label="Unique Joins",
   )
 
-  ax.set_ylabel("Player Count", color=color_p)
-  ax.set_xlabel(f"Timeline ({view_mode})", color="#0f4")
-  ax.set_xticks(x_indexes)
-  ax.set_xticklabels(formatted_labels, rotation=35, ha="right")
-  ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=12, integer=True))
-
+  ax.set_ylabel("Player Count", color="#0f4")
+  ax.set_xlabel("Timeline (" + view_mode + ")", color="#0f4")
   ax.set_ylim(bottom=0)
   ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-  ax.grid(True, color="#0f42", linestyle="--", alpha=0.5)
+  ax.grid(True, which="major", axis="y", color="#0f42", linestyle="--", alpha=0.4)
+  ax.grid(False, axis="x")
+
+  legend = ax.legend(
+      loc="upper left", fontsize=8, facecolor="#000c00", edgecolor="#0f44"
+  )
+  for text in legend.get_texts():
+    text.set_color("#0f4")
 
   title_suffix = f" [{target_input}]" if target_input else " (Latest)"
   ax.set_title(
-      f"Bedrock Node Player Metrics - {view_mode} View{title_suffix}",
+      f"Stonercraft420 Metrics - {view_mode} View{title_suffix}",
       color="#0f4",
       pad=15,
       fontweight="bold",
   )
 
-  legend = ax.legend(
-      loc="upper right", fontsize=8, facecolor="#000c00", edgecolor="#0f44"
-  )
-  for text in legend.get_texts():
-    text.set_color("#0f4")
+  if view_mode == "Day":
+      latest_dt = datetime.strptime(timestamps[-1], "%Y-%m-%d %H:%M:%S")
+      tick_indices = []
+      tick_labels = []
+      for i, ts in enumerate(timestamps):
+          dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+          hours_ago = int((latest_dt - dt).total_seconds() // 3600)
+          
+          if hours_ago % 6 == 0:
+              tick_indices.append(i)
+              if hours_ago == 0:
+                  tick_labels.append("Just now")
+              elif hours_ago % 24 == 0:
+                  days = hours_ago // 24
+                  tick_labels.append(f"{days} Day{'s' if days > 1 else ''} ago")
+              else:
+                  tick_labels.append(f"{hours_ago} hrs ago")
+      plt.xticks(tick_indices, tick_labels, rotation=30, ha="right")
+  else:
+      formatted_labels = []
+      for ts in timestamps:
+          try:
+              dt = datetime.strptime(ts, "%Y-%m-%d 00:00:00")
+              if view_mode == "Month":
+                  time_str = dt.strftime("%b %d")
+              else:
+                  time_str = dt.strftime("%b %Y")
+              formatted_labels.append(time_str)
+          except ValueError:
+              formatted_labels.append(ts)
+      
+      if len(timestamps) > 20:
+          step = len(timestamps) // 20
+          plt.xticks(
+              x_indexes[::step],
+              [formatted_labels[i] for i in range(0, len(timestamps), step)],
+              rotation=30,
+              ha="right",
+          )
+      else:
+          plt.xticks(x_indexes, formatted_labels, rotation=30, ha="right")
 
   fig.tight_layout()
 
-  buf = io.BytesIO()
-  fig.savefig(buf, format="png", bbox_inches='tight', facecolor=fig.get_facecolor(), edgecolor='none')
-  buf.seek(0)
-  chart_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-  
-  return chart_b64
+  img = io.BytesIO()
+  fig.savefig(img, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
+  img.seek(0)
+  plt.close(fig)
+
+  return base64.b64encode(img.getvalue()).decode("utf-8")
 
 @app.route("/background.png")
 def serve_background():
-    return send_from_directory(DATA_DIR, "background.png")
+    return send_from_directory(IMAGES_DIR, "background.png")
 
 @app.route("/banner.png")
 def serve_banner():
-  return send_from_directory(DATA_DIR, "banner.png")
+    return send_from_directory(IMAGES_DIR, "banner.png")
 
 @app.route("/icon.png")
 def serve_icon():
-  return send_from_directory(DATA_DIR, "icon.png")
+    return send_from_directory(IMAGES_DIR, "icon.png")
 
+@app.route("/restart-script", methods=["POST"])
+def restart_script():
+  if not session.get("logged_in"):
+    return jsonify({"error": "Unauthorized"}), 401
+
+  send_admin_alert(
+      "🔄 **SCRIPT RESTART:** Graceful script restart initiated via web"
+      " dashboard."
+  )
+
+  send_to_mc("stop", "SCRIPT_RESTART")
+
+  def do_restart():
+    global mc_process
+    if mc_process and mc_process.poll() is None:
+      try:
+        mc_process.wait(timeout=15)
+      except Exception:
+        pass
+
+    time.sleep(2)
+
+    try:
+        python = sys.executable
+        script_path = os.path.abspath(__file__)
+        subprocess.Popen([python, script_path] + sys.argv[1:], cwd=SCRIPT_DIR)
+    except Exception as e:
+        print(f"Restart spawn error: {e}")
+
+    os._exit(0)
+
+  threading.Thread(target=do_restart, daemon=True).start()
+  return jsonify({"success": True})
 
 @app.route("/manifest.json")
 def serve_manifest():
@@ -2194,11 +2405,11 @@ def manage_properties():
     load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
     expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
     
-    if not session.get("settings_unlocked"):
+    if not session.get("properties_unlocked"):
         if request.method == "POST":
             entered_pw = request.form.get("settings_pw", "")
             if entered_pw == expected_settings_pw:
-                session["settings_unlocked"] = True
+                session["properties_unlocked"] = True
                 return redirect(url_for("manage_properties"))
             else:
                 return render_template_string(
@@ -2213,6 +2424,9 @@ def manage_properties():
     
     if request.method == "POST":
         properties_content = request.form.get("properties_content", "")
+
+        properties_content = properties_content.replace("\r\n", "\n").replace("\r", "\n")
+
         try:
             with open(PROPERTIES_FILE, "w", encoding="utf-8") as f:
                 f.write(properties_content)
@@ -2290,7 +2504,8 @@ def metrics_data():
         return jsonify({"chart_url": cached_item["chart_url"]})
 
   parsed_data = load_metrics_data()
-  timestamps, active_players, unique_joins = filter_and_aggregate(
+  
+  timestamps, active_players, unique_joins, server_statuses = filter_and_aggregate(
       parsed_data, view_mode, target_input
   )
 
@@ -2298,11 +2513,14 @@ def metrics_data():
   if timestamps:
     with chart_lock:
       chart_url = generate_plot_image(
-          timestamps, active_players, unique_joins, view_mode, target_input
+          timestamps, active_players, unique_joins, server_statuses, view_mode, target_input
       )
 
     if chart_url:
       with chart_cache_lock:
+        if len(CHART_CACHE) >= 50:
+          oldest_key = min(CHART_CACHE, key=lambda k: CHART_CACHE[k]["timestamp"])
+          del CHART_CACHE[oldest_key]
         CHART_CACHE[cache_key] = {"chart_url": chart_url, "timestamp": now}
 
   return jsonify({"chart_url": chart_url})
@@ -2348,68 +2566,80 @@ def manage_settings():
     expected_code = os.getenv("BAN_SECRET_CODE", "BAN123")
     
     if request.method == "POST":
-      cf_token = request.form.get("cf_token", "").strip()
+        cf_token = request.form.get("cf_token", "").strip()
 
-      restart_hours = request.form.get("restart_hours", "6").strip()
-      backup_hours = request.form.get("backup_hours", "24").strip()
+        restart_hours = request.form.get("restart_hours", "6").strip()
+        restart_start_time = request.form.get("restart_start_time", "").strip()
+        backup_hours = request.form.get("backup_hours", "24").strip()
+        backup_start_time = request.form.get("backup_start_time", "").strip()
 
-      new_ban_code = request.form.get("ban_code", "").strip()
-      ban_code = new_ban_code if new_ban_code else expected_code
+        new_ban_code = request.form.get("ban_code", "").strip()
+        ban_code = new_ban_code if new_ban_code else expected_code
 
-      new_admin_pw = request.form.get("new_admin_pw", "").strip()
-      if new_admin_pw:
-        current_user = session.get("username", "owner")
-        current_accounts = load_accounts()
-        if current_user in current_accounts:
-          current_accounts[current_user] = generate_password_hash(new_admin_pw)
-          with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(current_accounts, f, indent=4)
+        new_admin_pw = request.form.get("new_admin_pw", "").strip()
+        if new_admin_pw:
+            current_user = session.get("username", "owner")
+            current_accounts = load_accounts()
+            if current_user in current_accounts:
+                current_accounts[current_user] = generate_password_hash(new_admin_pw)
+                with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(current_accounts, f, indent=4)
 
-      new_admin_user = request.form.get("new_admin_user", "").strip().lower()
-      new_admin_pass = request.form.get("new_admin_pass", "").strip()
-      if new_admin_user and new_admin_pass:
-        current_accounts = load_accounts()
-        current_accounts[new_admin_user] = generate_password_hash(new_admin_pass)
-        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-          json.dump(current_accounts, f, indent=4)
-        send_admin_alert(
-            f"👤 **ADMIN CREATED:** New admin account `{new_admin_user}` was"
-            f" added by `{session.get('username')}`."
+        new_admin_user = request.form.get("new_admin_user", "").strip().lower()
+        new_admin_pass = request.form.get("new_admin_pass", "").strip()
+        if new_admin_user and new_admin_pass:
+            current_accounts = load_accounts()
+            current_accounts[new_admin_user] = generate_password_hash(new_admin_pass)
+            with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(current_accounts, f, indent=4)
+            send_admin_alert(
+                f"👤 **ADMIN CREATED:** New admin account `{new_admin_user}` was"
+                f" added by `{session.get('username')}`."
+            )
+
+        flask_secret = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
+        use_playit = os.getenv("USE_PLAYIT", "False")
+        current_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+        flask_host = os.getenv("FLASK_HOST", "127.0.0.1")
+        cookie_secure = os.getenv("COOKIE_SECURE", "False")
+
+        bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
+        webhook_url = os.getenv("ADMIN_WEBHOOK_URL", "")
+        vc_status = os.getenv("VC_STATUS_ID", "0")
+        vc_players = os.getenv("VC_PLAYERS_ID", "0")
+        slot3_label = request.form.get("slot3_label", "SLOT 3").strip()
+        slot3_cmd = request.form.get("slot3_cmd", "").strip()
+
+        env_content = (
+            "# --- Bedrock Node CONFIGURATION ---\n"
+            f"USE_PLAYIT={use_playit}\n"
+            f"CLOUDFLARE_TUNNEL_TOKEN={cf_token}\n"
+            f"RESTART_INTERVAL_HOURS={restart_hours}\n"
+            f"RESTART_START_TIME={restart_start_time}\n"
+            f"BACKUP_INTERVAL_HOURS={backup_hours}\n\n"
+            f"BACKUP_START_TIME={backup_start_time}\n\n"
+            f"SLOT3_LABEL={slot3_label}\n"
+            f"SLOT3_CMD={slot3_cmd}\n\n"
+            f"DISCORD_BOT_TOKEN={bot_token}\n"
+            f"ADMIN_WEBHOOK_URL={webhook_url}\n"
+            f"VC_STATUS_ID={vc_status}\n"
+            f"VC_PLAYERS_ID={vc_players}\n\n"
+            f"FLASK_PORT=5000\n"
+            f"FLASK_HOST={flask_host}\n"
+            f"FLASK_SECRET_KEY={flask_secret}\n"
+            f"BAN_SECRET_CODE={ban_code}\n"
+            f"SETTINGS_PASSWORD={current_settings_pw}\n"
+            f"COOKIE_SECURE={cookie_secure}\n"
         )
 
-      flask_secret = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
-      use_playit = os.getenv("USE_PLAYIT", "False")
-      current_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write(env_content)
 
-      bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
-      webhook_url = os.getenv("ADMIN_WEBHOOK_URL", "")
-      vc_status = os.getenv("VC_STATUS_ID", "0")
-      vc_players = os.getenv("VC_PLAYERS_ID", "0")
-
-      env_content = (
-          "# --- BEDROCK NODE CONFIGURATION ---\n"
-          f"USE_PLAYIT={use_playit}\n"
-          f"CLOUDFLARE_TUNNEL_TOKEN={cf_token}\n"
-          f"RESTART_INTERVAL_HOURS={restart_hours}\n"
-          f"BACKUP_INTERVAL_HOURS={backup_hours}\n\n"
-          f"DISCORD_BOT_TOKEN={bot_token}\n"
-          f"ADMIN_WEBHOOK_URL={webhook_url}\n"
-          f"VC_STATUS_ID={vc_status}\n"
-          f"VC_PLAYERS_ID={vc_players}\n\n"
-          f"FLASK_PORT=5000\n"
-          f"FLASK_SECRET_KEY={flask_secret}\n"
-          f"BAN_SECRET_CODE={ban_code}\n"
-          f"SETTINGS_PASSWORD={current_settings_pw}\n"
-      )
-
-      with open(env_path, "w", encoding="utf-8") as f:
-        f.write(env_content)
-
-      send_admin_alert(
-          "⚙️ **SETTINGS UPDATED:** Server configuration parameters were"
-          " modified via the web dashboard."
-      )
-      return redirect(url_for("home"))
+        send_admin_alert(
+            "⚙️ **SETTINGS UPDATED:** Server configuration parameters were"
+            " modified via the web dashboard."
+        )
+        return redirect(url_for("home"))
         
     return render_template_string(
         """
@@ -2457,20 +2687,41 @@ def manage_settings():
                 <!-- ENGINE & AUTOMATION SECTION -->
                 <div class="section-card">
                     <div class="section-title">Engine & Automation</div>
-                    
+    
                     <label>Cloudflare Tunnel Token:</label>
                     <input name="cf_token" value="{{ config.cf_token }}" autocomplete="off">
-                    
-                    <div style="display: flex; gap: 12px;">
+    
+                    <div style="display: flex; gap: 12px; margin-bottom: 12px;">
                         <div style="flex: 1;">
-                            <label>Restart Interval (Hours):</label>
+                              <label>Restart Interval (Hours):</label>
                             <input name="restart_hours" value="{{ config.restart_hours }}" autocomplete="off">
+                          </div>
+                          <div style="flex: 1;">
+                              <label>First Restart Time (HH:MM):</label>
+                              <input name="restart_start_time" value="{{ config.restart_start_time }}" autocomplete="off" placeholder="e.g. 06:00">
                         </div>
+                    </div>
+
+                    <div style="display: flex; gap: 12px;">
                         <div style="flex: 1;">
                             <label>Backup Interval (Hours):</label>
                             <input name="backup_hours" value="{{ config.backup_hours }}" autocomplete="off">
                         </div>
+                        <div style="flex: 1;">
+                            <label>First Backup Time (HH:MM):</label>
+                            <input name="backup_start_time" value="{{ config.backup_start_time }}" autocomplete="off" placeholder="e.g. 08:00">
+                        </div>
                     </div>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Custom Action Button (Slot 3)</div>
+                    
+                    <label>Button Label:</label>
+                    <input name="slot3_label" value="{{ config.slot3_label }}" autocomplete="off" placeholder="e.g. SET DAY">
+                    
+                    <label>Command to Execute:</label>
+                    <input name="slot3_cmd" value="{{ config.slot3_cmd }}" autocomplete="off" placeholder="e.g. time set day">
                 </div>
 
                 <!-- SECURITY & ACCESS SECTION -->
@@ -2496,16 +2747,44 @@ def manage_settings():
                 </div>
                 
                 <button type="submit">SAVE CHANGES</button>
+
+                <!-- RESTART SCRIPT SECTION -->
+                <div class="section-card" style="border-color: #ffaa0044; background: rgba(255, 170, 0, 0.03); margin-top: 15px;">
+                    <div class="section-title" style="color: #ffaa0088;">System Control</div>
+                    <p style="font-size: 12px; color: #ffcc00; font-family: monospace; margin-bottom: 12px;">
+                        Need to apply new environment variables, tokens, or code updates? Restart the entire Python script without dropping your background tunnels.
+                    </p>
+                    <button type="button" onclick="restartScriptNode()" style="background: #ffaa00; color: #000; font-weight: bold; width: 100%; padding: 14px; border: none; border-radius: 12px; cursor: pointer; font-size: 15px;">RESTART ENTIRE SCRIPT NOW</button>
+                </div>
             </form>
         </div>
+
+        <script>
+        function restartScriptNode() {
+            if (confirm("Are you sure you want to restart the entire Bedrock Node script?")) {
+                fetch('/restart-script', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        document.body.innerHTML = '<div style="background:#000;color:#ffaa00;height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center;font-family:monospace;font-size:20px;">RESTARTING SCRIPT...<br><span style="font-size:14px;color:#0f4;margin-top:10px;">Refreshing page automatically in 5 seconds...</span></div>';
+                        setTimeout(() => { window.location.href = '/'; }, 5000);
+                    }
+                });
+            }
+        }
+        </script>
         </body></html>
         """,
         banner=BACKGROUND_URL,
         config={
             "cf_token": os.getenv("CLOUDFLARE_TUNNEL_TOKEN", ""),
             "restart_hours": os.getenv("RESTART_INTERVAL_HOURS", "6"),
+            "restart_start_time": os.getenv("RESTART_START_TIME", ""),
             "backup_hours": os.getenv("BACKUP_INTERVAL_HOURS", "24"),
+            "backup_start_time": os.getenv("BACKUP_START_TIME", ""),
             "ban_code": "",
+            "slot3_label": os.getenv("SLOT3_LABEL", "SLOT 3"),
+            "slot3_cmd": os.getenv("SLOT3_CMD", ""),
         },
     )
 
@@ -2513,6 +2792,15 @@ def manage_settings():
 def shutdown():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.get_json() or {}
+    entered_pw = data.get("password", "").strip()
+    
+    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+    
+    if entered_pw != expected_settings_pw:
+        return jsonify({"success": False, "error": "Incorrect settings password!"}), 403
     
     send_admin_alert("🛑 **SYSTEM SHUTDOWN:** Graceful shutdown initiated via web dashboard.")
     
@@ -2540,9 +2828,10 @@ def shutdown():
 @app.route("/api/server-status")
 def server_status():
   global ONLINE_PLAYERS
+  max_p = get_max_players()
   with state_lock:
     p_count = len(ONLINE_PLAYERS) if is_running else 0
-  response = jsonify({"online": is_running, "players": p_count, "max": 30})
+  response = jsonify({"online": is_running, "players": p_count, "max": max_p})
   response.headers.add("Access-Control-Allow-Origin", "*")
   response.headers.add("Access-Control-Allow-Methods", "GET")
   return response
@@ -2552,7 +2841,7 @@ def server_status():
 def stats():
   if not session.get("logged_in"):
     return jsonify({"error": "Unauthorized"}), 401
-  global ONLINE_PLAYERS, backup_timer_start
+  global ONLINE_PLAYERS, backup_timer_start, next_backup_target
   uptime = (
       str(datetime.now() - start_time).split(".")[0]
       if start_time
@@ -2572,14 +2861,20 @@ def stats():
   remaining = next_target - now if next_target > now else timedelta(0)
   restart_in = str(remaining).split(".")[0]
 
-  next_backup_target = backup_timer_start + timedelta(hours=backup_interval_hours)
-  backup_remaining = next_backup_target - now if next_backup_target > now else timedelta(0)
-  backup_in = str(backup_remaining).split(".")[0]
+  with state_lock:
+      current_backup_target = next_backup_target
 
+  if current_backup_target and current_backup_target > now:
+      backup_remaining = current_backup_target - now
+  else:
+      backup_remaining = timedelta(0)
+  backup_in = str(backup_remaining).split(".")[0]
+ 
+  max_p = get_max_players()
   with state_lock:
     if is_running:
       p_count = len(ONLINE_PLAYERS)
-      players_str = f"{p_count} / 30"
+      players_str = f"{p_count} / {max_p}"
     else:
       ONLINE_PLAYERS.clear()
       players_str = "OFFLINE"
@@ -2640,14 +2935,14 @@ def login():
 
       time.sleep(2)
       return render_template_string(
-          """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.json"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Bedrock Node"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>ACCESS DENIED</h2><p>Attempts remaining for '{{user}}': {{a}}</p><form method="POST"><input name="user" value="{{user}}" placeholder="USER"><input name="pw" type="password" placeholder="PASS"><button>RETRY</button></form></div></body></html>""",
+          """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.json"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Bedrock Node"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;max-width:400px;width:100%;box-sizing:border-box;} h2 { font-size: 18px; margin-top: 0; } input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>ACCESS DENIED</h2><p style="font-size:13px;">Attempts remaining for '{{user}}': {{a}}</p><form method="POST"><input name="user" value="{{user}}" placeholder="USER"><input name="pw" type="password" placeholder="PASS"><button>RETRY</button></form></div></body></html>""",
           b=BACKGROUND_URL,
           user=u,
           a=attempts_left,
       )
 
   return render_template_string(
-      """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.json"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Bedrock Node"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;} h2 { text-align: center; } input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}.footer{margin-top:15px;font-size:11px;color:#0f48;letter-spacing:0.5px;line-height:1.4;}</style></head><body><div class="box"><h2>Bedrock Node Hub</h2><form method="POST"><input name="user" placeholder="USER"><input name="pw" type="password" placeholder="PASS"><button>ENTER</button></form><div class="footer">© 2026 Nutcrustys420™. All Rights Reserved.<br>Tested & powered by Stonercraft420</div></div></body></html>""",
+      """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.json"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Bedrock Node"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;max-width:400px;width:100%;box-sizing:border-box;} h2 { font-size: 18px; margin-top: 0; line-height: 1.4; } input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}.footer{margin-top:15px;font-size:11px;color:#0f48;letter-spacing:0.5px;line-height:1.4;}</style></head><body><div class="box"><h2>Bedrock Node</h2><form method="POST"><input name="user" placeholder="USER"><input name="pw" type="password" placeholder="PASS"><button>ENTER</button></form><div class="footer">© 2026 Bedrock Node™. All Rights Reserved.<br>Tested & powered by Stonercraft420</div></div></body></html>""",
       b=BACKGROUND_URL,
   )
 
@@ -2669,6 +2964,10 @@ def home():
   if not session.get("logged_in"):
     return redirect(url_for("login"))
 
+  load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+  slot3_label = os.getenv("SLOT3_LABEL") or "SLOT 3"
+  slot3_cmd = os.getenv("SLOT3_CMD") or ""
+
   session.pop("settings_unlocked", None)
   session.pop("properties_unlocked", None)
   session.pop("discord_unlocked", None)
@@ -2680,9 +2979,14 @@ def home():
     )
   if request.method == "POST":
     if "note" in request.form:
+      note_content = request.form.get("note", "")
+      
+      # Normalize line endings to prevent double spacing
+      note_content = note_content.replace("\r\n", "\n").replace("\r", "\n")
+      
       with notes_lock:
-        with open(NOTES_FILE, "w", encoding="utf-8") as f:
-          f.write(request.form.get("note", ""))
+        with open(NOTES_FILE, "w", encoding="utf-8", newline="\n") as f:
+          f.write(note_content)
     else:
       c = request.form.get("c", "").strip()
       if c:
@@ -2886,6 +3190,11 @@ def home():
     }
     </style></head><body>
 
+    <div id="updateBanner" style="display:none; width:100%; max-width:900px; background:rgba(255,170,0,0.15); border:1px solid #ffaa0055; padding:12px 20px; border-radius:12px; box-sizing:border-box; justify-content:space-between; align-items:center; font-family:monospace; font-size:13px; color:#ffcc00; margin-bottom: 5px;">
+        <span>🚀 <b>UPDATE AVAILABLE:</b> Version <span id="latestVersionText"></span> is out! Check out the repository for the latest fixes and features.</span>
+        <a id="updateLink" href="https://github.com/stonercraft420/Bedrock-Node" target="_blank" style="background:#ffaa00; color:#000; padding:6px 12px; border-radius:8px; text-decoration:none; font-weight:bold;">VIEW UPDATE</a>
+    </div>
+
     <div class="top-bar">
         <div class="dropdown">
             <button class="dropbtn">ADMIN TOOLS ▼</button>
@@ -2921,7 +3230,7 @@ def home():
     </div>
     
     <div class="panel">
-        <h2>Bedrock Node Hub</h2>
+        <h2>Bedrock Node</h2>
     
         <div class="stats-bar">
             <div class="stats-row">
@@ -2931,6 +3240,7 @@ def home():
                 <span style="color:#0ff">RST IN: <b id="rst">...</b></span>
                 <span style="color:#ff00ff">BCK UP: <b id="bck">...</b></span>
             </div>
+
             <div class="stats-row-center">
                 <span>PLAYERS: <b id="players">...</b></span>
             </div>
@@ -2939,7 +3249,7 @@ def home():
         <div class="quick-actions">
             <button type="button" class="btn-restart" onclick="openRestartModal()" style="flex: 1; margin-top: 0;">RESTART SERVER</button>
             <button type="button" onclick="openStopModal()" style="flex: 1; margin-top: 0; background: #ff4444; color: #fff; font-weight: bold; border: none; border-radius: 10px; padding: 12px; cursor: pointer; font-size: 14px;">STOP SERVER</button>
-            <button type="button" class="btn-placeholder" style="flex: 1; margin-top: 0;">SLOT 3</button>
+            <button type="button" onclick="executeSlot3()" style="flex: 1; margin-top: 0; background: #003322; color: #00ff66; border: 1px solid #0f44; border-radius: 10px; padding: 12px; cursor: pointer; font-size: 14px; font-weight: bold;">{{ slot3_label }}</button>
         </div>
 
         <div class="l" id="logBox">{% for a in actions %}<div>{{a | safe}}</div>{% endfor %}</div>
@@ -2950,7 +3260,7 @@ def home():
         </form>
 
         <div style="margin-top: 20px; text-align: center; font-size: 11px; color: #0f48; font-family: monospace; line-height: 1.4;">
-            © 2026 Nutcrustys420™. All Rights Reserved.<br>
+            Bedrock Node v{{ version }} | © 2026 Nutcrustys420™. All Rights Reserved.<br>
             Tested & powered by Stonercraft420
         </div>
     </div>
@@ -2958,7 +3268,7 @@ def home():
     <div id="restartModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; justify-content:center; align-items:center; padding:20px; box-sizing:border-box;">
         <div style="background:rgba(0,12,0,0.98); border:1px solid #0f45; padding:25px; border-radius:20px; width:100%; max-width:400px; text-align:center; box-sizing:border-box;">
             <h3 style="color:#0f4; margin-top:0;">RESTART SYSTEM</h3>
-            <p style="color:#0ff; font-size:13px; font-family:monospace; margin-bottom:20px;">Are you sure you want to restart Bedrock Node?</p>
+            <p style="color:#0ff; font-size:13px; font-family:monospace; margin-bottom:20px;">Are you sure you want to restart The Server?</p>
             <div style="display:flex; gap:10px;">
                 <button type="button" id="restartConfirmBtn" style="background:#0f4; color:#000; margin-top:0;">YES</button>
                 <button type="button" onclick="closeRestartModal()" style="background:#ff4444; color:#fff; margin-top:0;">NO</button>
@@ -2980,7 +3290,7 @@ def home():
     <div id="metricsModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; justify-content:center; align-items:center; overflow-y:auto; padding:20px; box-sizing:border-box;">
         <div style="background:rgba(0,12,0,0.98); border:1px solid #0f45; padding:25px; border-radius:20px; width:100%; max-width:900px; position:relative; box-sizing:border-box;">
             <button type="button" onclick="closeMetricsModal()" style="position:absolute; top:15px; right:15px; width:auto; padding:5px 12px; background:#ff4444; color:#fff; font-size:14px; margin:0;">[X]</button>
-            <h2 style="text-align:center; color:#0f4; margin-top:0;">BEDROCK NODE METRICS DASHBOARD</h2>
+            <h2 style="text-align:center; color:#0f4; margin-top:0;">Server METRICS DASHBOARD</h2>
             
             <form id="metricsForm" onsubmit="loadMetricsChart(event)" style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center; margin-bottom:20px;">
                 <select id="modal_view_mode" style="background:#000; color:#0f4; border:1px solid #0f44; padding:10px; border-radius:10px; flex:1; min-width:150px;">
@@ -3001,7 +3311,8 @@ def home():
     <div id="stopModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; justify-content:center; align-items:center; padding:20px; box-sizing:border-box;">
         <div style="background:rgba(0,12,0,0.98); border:1px solid #ff444455; padding:25px; border-radius:20px; width:100%; max-width:400px; text-align:center; box-sizing:border-box;">
             <h3 style="color:#ff4444; margin-top:0;">STOP ENTIRE SCRIPT</h3>
-            <p style="color:#ffcc00; font-size:13px; font-family:monospace; margin-bottom:20px;">Are you sure? This will shut down the server and close the entire application.</p>
+            <p style="color:#ffcc00; font-size:13px; font-family:monospace; margin-bottom:15px;">Enter Settings Password to shut down the application:</p>
+            <input type="password" id="stopPasswordInput" placeholder="Settings Password..." style="background:#000; color:#ff4444; border:1px solid #ff444455; padding:10px; border-radius:10px; width:100%; box-sizing:border-box; margin-bottom:15px; font-size:14px;" autocomplete="off">
             <div style="display:flex; gap:10px;">
                 <button type="button" id="stopConfirmBtn" style="background:#ff4444; color:#fff; margin-top:0;">YES, STOP</button>
                 <button type="button" onclick="closeStopModal()" style="background:#0f4; color:#000; margin-top:0;">CANCEL</button>
@@ -3029,9 +3340,20 @@ def home():
     function closeStopModal() { document.getElementById('stopModal').style.display = 'none'; }
 
     document.getElementById('stopConfirmBtn').onclick = function() {
-        fetch('/shutdown', { method: 'POST' })
-        .then(() => {
-            document.body.innerHTML = '<div style="background:#000;color:#ff4444;height:100vh;display:flex;justify-content:center;align-items:center;font-family:monospace;font-size:24px;">SYSTEM SHUTDOWN COMPLETE</div>';
+        const password = document.getElementById('stopPasswordInput').value;
+        
+        fetch('/shutdown', { 
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: password })
+        })
+        .then(async r => {
+            const data = await r.json();
+            if (r.ok && data.success) {
+                document.body.innerHTML = '<div style="background:#000;color:#ff4444;height:100vh;display:flex;justify-content:center;align-items:center;font-family:monospace;font-size:24px;">SYSTEM SHUTDOWN COMPLETE</div>';
+            } else {
+                alert(data.error || "Incorrect password!");
+            }
         });
     };
 
@@ -3050,6 +3372,27 @@ def home():
     }
     function closeMetricsModal() {
         document.getElementById('metricsModal').style.display = 'none';
+    }
+
+    function executeSlot3() {
+        const cmd = "{{ slot3_cmd }}";
+        if (!cmd) {
+            alert("Slot 3 command is not configured! Go to Server Settings to set it up.");
+            return;
+        }
+        
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/';
+
+        const cmdInput = document.createElement('input');
+        cmdInput.type = 'hidden';
+        cmdInput.name = 'c';
+        cmdInput.value = cmd;
+        form.appendChild(cmdInput);
+
+        document.body.appendChild(form);
+        form.submit();
     }
 
     document.getElementById('restartConfirmBtn').onclick = function() {
@@ -3092,6 +3435,11 @@ def home():
         document.getElementById('players').innerText = d.players;
         document.getElementById('rst').innerText = d.restart_in;
         document.getElementById('bck').innerText = d.backup_in;
+
+        if (d.update_available) {
+            document.getElementById('latestVersionText').innerText = d.latest_version;
+            document.getElementById('updateBanner').style.display = 'flex';
+        }
     });
 
     socket.on('console_log', (data) => {
@@ -3125,6 +3473,9 @@ def home():
             } else {
                 container.innerHTML = '<p style="color:#ffcc00; font-family:monospace;">-> Notice: No data found for that specific filter range.</p>';
             }
+        })
+        .catch(() => {
+            container.innerHTML = '<p style="color:#ff4444; font-family:monospace;">Failed to load chart.</p>';
         });
     }
     </script>
@@ -3132,6 +3483,9 @@ def home():
       banner=BACKGROUND_URL,
       actions=last_actions,
       notes=get_notes(),
+      slot3_label=slot3_label,
+      slot3_cmd=slot3_cmd,
+      version=VERSION,
   )
 
 if __name__ == "__main__":
@@ -3142,9 +3496,9 @@ if __name__ == "__main__":
     if not os.path.exists(env_path) or not os.path.exists(accounts_path):
         print("No configuration found. Launching desktop setup wizard GUI...")
         run_desktop_wizard(DATA_DIR)
-        print("Wizard complete. Starting Bedrock Node Hub...")
+        print("Wizard complete. Starting Bedrock Node...")
     else:
-        print("Configuration found. Starting Bedrock Node Hub...")
+        print("Configuration found. Starting Bedrock Node...")
 
         threading.Thread(target=lambda: (time.sleep(2), open_as_app("http://localhost:5000")), daemon=True).start()
 
@@ -3181,6 +3535,7 @@ if __name__ == "__main__":
         threading.Thread(target=run_discord_bot, daemon=True).start()
         threading.Thread(target=hourly_metrics_logger, daemon=True).start()
         threading.Thread(target=websocket_stats_broadcaster, daemon=True).start()
+        threading.Thread(target=check_for_updates, daemon=True).start()
 
         socketio.run(app, host=FLASK_HOST, port=FLASK_PORT)
 
