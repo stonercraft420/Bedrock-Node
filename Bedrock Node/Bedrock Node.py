@@ -1,47 +1,41 @@
+import asyncio
 import base64
 import csv
+from datetime import datetime, timedelta
 import html
 import io
 import json
 import logging
 import os
+import platform
 import re
+import secrets
 import shutil
+import stat
 import subprocess
+import sys
 import threading
 import time
-import traceback
-import urllib.request
-import asyncio
-import sys
-import platform
-import stat
-import serial
-
-import colorama
-import secrets
 import tkinter as tk
+from tkinter import messagebox
+import urllib.request
 import webbrowser
 
+import colorama
+import discord
+from discord.ext import tasks
+from dotenv import load_dotenv
+from flask import Flask, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
+from flask_socketio import SocketIO
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 import psutil
-from tkinter import messagebox, ttk
-
-from datetime import datetime, timedelta
-import discord
-from discord.ext import tasks
-from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
-from flask_socketio import SocketIO, emit
 from werkzeug.security import check_password_hash, generate_password_hash
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
-
-DISCORD_ENABLED = True
 
 if getattr(sys, 'frozen', False):
     SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.executable))
@@ -51,28 +45,22 @@ else:
 SERVER_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 IMAGES_DIR = os.path.join(SCRIPT_DIR, "images")
 PROPERTIES_FILE = os.path.join(SERVER_DIR, "server.properties")
+ALLOWLIST_FILE = os.path.join(SERVER_DIR, "allowlist.json")
 DATA_DIR = os.path.join(SCRIPT_DIR, "server_vault")
 if not os.path.exists(DATA_DIR):
-  os.makedirs(DATA_DIR)
+    os.makedirs(DATA_DIR)
 
 load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
 
-VERSION = "1.0.3"
-CURRENT_VERSION = "1.0.3"
-LATEST_VERSION = "1.0.3"
+VERSION = "1.0.4"
+CURRENT_VERSION = "1.0.4"
+LATEST_VERSION = "1.0.4"
 UPDATE_AVAILABLE = False
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 ADMIN_WEBHOOK_URL = os.getenv("ADMIN_WEBHOOK_URL", "").strip()
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "default_secret_key")
 BAN_SECRET_CODE = os.getenv("BAN_SECRET_CODE", "BAN")
-SERIAL_PORT = os.getenv("SERIAL_PORT", "COM3")
-SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", 19200))
-TOTAL_AH = float(os.getenv("TOTAL_AH", 1120))
-MAX_V = float(os.getenv("MAX_V", 12.80))
-GEN_ALARM_V = float(os.getenv("GEN_ALARM_V", 12.35))
-SHUTDOWN_V = float(os.getenv("SHUTDOWN_V", 11.50))
-CHARGE_DETECT_V = float(os.getenv("CHARGE_DETECT_V", 13.60))
 
 DISCORD_ENABLED = bool(DISCORD_BOT_TOKEN)
 WEBHOOK_ENABLED = bool(ADMIN_WEBHOOK_URL)
@@ -97,7 +85,7 @@ G, W, R, Y, C, B, PURPLE, END = (
 colorama.init(autoreset=True)
 
 app = Flask(__name__, static_folder=IMAGES_DIR, static_url_path='/images')
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "default_secret_key")
+app.secret_key = FLASK_SECRET_KEY
 
 cookie_secure_setting = os.getenv("COOKIE_SECURE", "False").lower() == "true"
 
@@ -110,14 +98,13 @@ socketio = SocketIO(
 )
 
 app.config.update(
-    SESSION_COOKIE_SECURE=cookie_secure_setting,      
-    SESSION_COOKIE_HTTPONLY=True,   
-    SESSION_COOKIE_SAMESITE='Lax', 
+    SESSION_COOKIE_SECURE=cookie_secure_setting,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
 )
 
 IS_WINDOWS = os.name == "nt"
 SERVER_EXE = "bedrock_server.exe" if IS_WINDOWS else "bedrock_server"
-BANNER_URL = "/images/banner.png"
 BACKGROUND_URL = "/images/background.png"
 
 BAN_HTML_TEMPLATE = """
@@ -186,7 +173,7 @@ th { background: rgba(0,255,64,0.1); color: #0ff; }
 
 <div class="panel">
     <a href="/" class="close-btn">[X]</a>
-    <h2>Ban Matrix</h2>
+    <h2>Blacklist</h2>
     
     <h3>Add Target to Blacklist</h3>
     <form id="banForm" method="POST" onsubmit="interceptBan(event)">
@@ -218,7 +205,6 @@ th { background: rgba(0,255,64,0.1); color: #0ff; }
     </table>
 </div>
 
-<!-- SECURE MODAL POPUP (SHARED FOR BAN & PARDON) -->
 <div id="securityModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; justify-content:center; align-items:center; padding:20px; box-sizing:border-box;">
     <div style="background:rgba(0,12,0,0.98); border:1px solid #0f45; padding:25px; border-radius:20px; width:100%; max-width:400px; text-align:center; box-sizing:border-box;">
         <h3 id="modalTitle" style="color:#0f4; margin-top:0;">SECURITY CHECK</h3>
@@ -322,13 +308,11 @@ document.getElementById('modalConfirmBtn').onclick = function() {
 """
 
 LOG_DIR = os.path.join(DATA_DIR, "command_logs")
-SERVER_LOG_DIR = os.path.join(DATA_DIR, "server_logs")
 NOTES_FILE = os.path.join(DATA_DIR, "admin_notes.txt")
 UNIQUE_PLAYERS_FILE = os.path.join(DATA_DIR, "unique_players.json")
 BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 ADMIN_LOG_FILE = os.path.join(DATA_DIR, "admin_logins.txt")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "secureaccounts.json")
-
 
 state_lock = threading.Lock()
 chart_lock = threading.Lock()
@@ -336,18 +320,17 @@ notes_lock = threading.Lock()
 blacklist_lock = threading.Lock()
 chart_cache_lock = threading.Lock()
 unique_players_lock = threading.Lock()
+restart_event = threading.Event()
 
 mc_process = None
 is_running = False
 is_restarting = False
+manual_restart_requested = False
+is_auto_restarting = False
 seconds_left = 0
 start_time = None
-restart_timer_start = datetime.now()
-backup_timer_start = datetime.now()
 last_actions = []
 failed_attempts = {}
-needs_backup = False
-last_backup_date = None
 is_backing_up = False
 ONLINE_PLAYERS = set()
 CHART_CACHE = {}
@@ -374,7 +357,7 @@ def check_for_updates():
     req = urllib.request.Request(url, headers={"User-Agent": "BedrockNode"})
     with urllib.request.urlopen(req, timeout=5) as response:
       data = json.loads(response.read().decode())
-      tag_name = data.get("tag_name", "").lstrip("v") # Strips a leading 'v' if your tags are like 'v1.0.4'
+      tag_name = data.get("tag_name", "").lstrip("v")
 
       LATEST_VERSION = tag_name
       remote_ver = parse_version(tag_name)
@@ -569,28 +552,30 @@ def run_desktop_wizard(data_dir):
 
             use_playit = (
                 True
-                if state["game_choice"].get() == "2"
+                if state["game_choice"].get() == "3"
                 or state["web_choice"].get() == "2"
                 else False
             )
 
             flask_host = "127.0.0.1" if state["web_choice"].get() == "1" else "0.0.0.0"
             flask_secret = secrets.token_hex(32)
+            ban_code_val = state["ban_code"].get().strip() or default_ban_code
+            settings_pw_val = state["settings_pw"].get().strip() or default_settings_pass
 
             env_content = (
-                "# --- Stoner CONFIGURATION ---\n"
+                "# --- Bedrock Node CONFIGURATION ---\n"
                 f"USE_PLAYIT={'True' if use_playit else 'False'}\n"
                 f"CLOUDFLARE_TUNNEL_TOKEN={state['cf_token'].get().strip()}\n\n"
-                f"DISCORD_BOT_TOKEN={state['bot_token'].get().strip()}\n"
-                f"ADMIN_WEBHOOK_URL={state['webhook_url'].get().strip()}\n"
-                f"VC_STATUS_ID={state['vc_status'].get().strip() or '0'}\n"
-                f"VC_PLAYERS_ID={state['vc_players'].get().strip() or '0'}\n\n"
-                f"FLASK_PORT=5000\n"
-                f"FLASK_HOST={flask_host}\n"
-                f"FLASK_SECRET_KEY={flask_secret}\n"
-                f"BAN_SECRET_CODE={state['ban_code'].get().strip()}\n"       
-                f"SETTINGS_PASSWORD={state['settings_pw'].get().strip()}\n"  
-                f"COOKIE_SECURE=False\n" 
+                 f"DISCORD_BOT_TOKEN={state['bot_token'].get().strip()}\n"
+                 f"ADMIN_WEBHOOK_URL={state['webhook_url'].get().strip()}\n"
+                 f"VC_STATUS_ID={state['vc_status'].get().strip() or '0'}\n"
+                 f"VC_PLAYERS_ID={state['vc_players'].get().strip() or '0'}\n\n"
+                 f"FLASK_PORT=5000\n"
+                 f"FLASK_HOST={flask_host}\n"
+                 f"FLASK_SECRET_KEY={flask_secret}\n"
+                 f"BAN_SECRET_CODE={ban_code_val}\n"
+                 f"SETTINGS_PASSWORD={settings_pw_val}\n"
+                 f"COOKIE_SECURE=False\n"
             )
 
             with open(os.path.join(data_dir, "securekeys.env"), "w", encoding="utf-8") as f:
@@ -662,24 +647,28 @@ def run_desktop_wizard(data_dir):
         elif step == 2:
             tk.Label(container, text="[Step 2 of 6] How will players join your server?", fg=accent_color, bg=bg_color, font=("Courier", 11, "bold")).pack(anchor="w", pady=(0, 5))
             
-            intro_text = """Choose Option 1 for local play/standard port forwarding,
-            or Option 2 if you can't port forward."""
+            intro_text = "Choose Option 1 for LAN/Port Forwarding, or Option 2 or 3 if you cannot port forward."
             tk.Label(container, text=intro_text, fg="#88cc88", bg=bg_color, font=("Courier", 8), justify="left").pack(anchor="w", pady=(0, 5))
 
             direct_frame = tk.Frame(container, bg="#001800", bd=1, relief="solid")
+            bnt_frame = tk.Frame(container, bg="#001800", bd=1, relief="solid")
             playit_frame = tk.Frame(container, bg="#001800", bd=1, relief="solid")
 
             def toggle_connection_boxes():
                 choice = state["game_choice"].get()
+                direct_frame.pack_forget()
+                bnt_frame.pack_forget()
+                playit_frame.pack_forget()
                 if choice == "1":
-                    playit_frame.pack_forget()
                     direct_frame.pack(fill="x", pady=5, padx=2)
                 elif choice == "2":
-                    direct_frame.pack_forget()
+                    bnt_frame.pack(fill="x", pady=5, padx=2)
+                elif choice == "3":
                     playit_frame.pack(fill="x", pady=5, padx=2)
 
-            tk.Radiobutton(container, text="1. Direct Connection (LAN / Port Forwarding)", variable=state["game_choice"], value="1", command=toggle_connection_boxes, fg=fg_color, bg=bg_color, selectcolor=entry_bg, activebackground=bg_color, activeforeground=fg_color, font=("Courier", 9)).pack(anchor="w", pady=1)
-            tk.Radiobutton(container, text="2. Playit.gg Tunnel (Starlink / Cellular / No Port Forwarding)", variable=state["game_choice"], value="2", command=toggle_connection_boxes, fg=fg_color, bg=bg_color, selectcolor=entry_bg, activebackground=bg_color, activeforeground=fg_color, font=("Courier", 9)).pack(anchor="w", pady=1)
+            tk.Radiobutton(container, text="1. Direct Connection (LAN / Port Forwarding)", variable=state["game_choice"], value="1", command=toggle_connection_boxes, fg=fg_color, bg=bg_color, selectcolor=entry_bg, activebackground=bg_color, activeforeground=fg_color, font=("Courier", 8)).pack(anchor="w", pady=1)
+            tk.Radiobutton(container, text="2. Bedrock Node Tunnel — Vanilla BDS NetherNet Tunnels", variable=state["game_choice"], value="2", command=toggle_connection_boxes, fg=fg_color, bg=bg_color, selectcolor=entry_bg, activebackground=bg_color, activeforeground=fg_color, font=("Courier", 8)).pack(anchor="w", pady=1)
+            tk.Radiobutton(container, text="3. Playit.gg Tunnel (Alternative UDP Tunnel)", variable=state["game_choice"], value="3", command=toggle_connection_boxes, fg=fg_color, bg=bg_color, selectcolor=entry_bg, activebackground=bg_color, activeforeground=fg_color, font=("Courier", 8)).pack(anchor="w", pady=1)
 
             tk.Label(direct_frame, text="Direct Connection Guide:", fg=accent_color, bg="#001800", font=("Courier", 9, "bold")).pack(anchor="w", padx=5, pady=2)
             
@@ -688,41 +677,41 @@ def run_desktop_wizard(data_dir):
                 "  No additional setup needed! Players on your local Wi-Fi/network\n"
                 "  can join using your internal IP (e.g., 192.168.x.x) on port 19132.\n\n"
                 "• Internet Access (Port Forwarding):\n"
-                "  To let players join from outside your home:\n"
                 "  1. Open your router's web admin page (usually 192.168.1.1 or 192.168.0.1).\n"
                 "  2. Locate the 'Port Forwarding' or 'Virtual Server' section.\n"
-                "  3. Forward port 19132 to this computer's local IPv4 address.\n\n"
-                "  ⚠️ Important Bedrock Details:\n"
-                "  • Protocol: Make sure to select UDP (or Both/TCP+UDP if UDP isn't standalone).\n"
-                "    Do not choose TCP only.\n"
-                "  • Port Number: Use 19132 (ignore Java guides telling you to use 25565)."
+                "  3. Forward UDP port 19132 to this computer's local IPv4 address."
             )
             tk.Label(direct_frame, text=direct_guide, fg="#aaffaa", bg="#001800", font=("Courier", 8), justify="left").pack(anchor="w", padx=5, pady=2)
 
-            def open_video_guide():
-                webbrowser.open("https://youtu.be/jxskGok7Z-E?si=TsY4vI-JRWZXiH1j")
+            tk.Button(direct_frame, text="[ Watch Port Forwarding Video ]", command=lambda: webbrowser.open("https://youtu.be/jxskGok7Z-E?si=TsY4vI-JRWZXiH1j"), bg="#003322", fg=accent_color, font=("Courier", 8, "bold")).pack(anchor="w", padx=5, pady=4)
 
-            tk.Button(direct_frame, text="[ Watch Port Forwarding Video ]", command=open_video_guide, bg="#003322", fg=accent_color, font=("Courier", 8, "bold")).pack(anchor="w", padx=5, pady=4)
+            tk.Label(bnt_frame, text="Bedrock Node Tunnel Setup:", fg=accent_color, bg="#001800", font=("Courier", 9, "bold")).pack(anchor="w", padx=5, pady=2)
+
+            bnt_guide = (
+                "• Purpose-built for Vanilla Bedrock Dedicated Servers (Starlink / CGNAT):\n"
+                "  1. Visit bedrocknode.net to claim your tunnel port or custom domain.\n"
+                "  2. Download the client directly from the website homepage.\n"
+                "  3. Run the tunnel alongside your server—no port forwarding needed!\n"
+                "  4. Share your assigned tunnel address with your players to connect."
+            )
+            tk.Label(bnt_frame, text=bnt_guide, fg="#aaffaa", bg="#001800", font=("Courier", 8), justify="left").pack(anchor="w", padx=5, pady=2)
+
+            bnt_btn_row = tk.Frame(bnt_frame, bg="#001800")
+            bnt_btn_row.pack(fill="x", padx=5, pady=4)
+            tk.Button(bnt_btn_row, text="[ Open BedrockNode.net ]", command=lambda: webbrowser.open("https://bedrocknode.net"), bg="#003322", fg=accent_color, font=("Courier", 8, "bold")).pack(side="left", padx=(0, 5))
+            tk.Button(bnt_btn_row, text="[ Watch Setup Tutorial ]", command=lambda: webbrowser.open("https://youtu.be/3Tl7MVIfH2Q?si=_JH2IwmuAI30kAb2"), bg="#002244", fg=accent_color, font=("Courier", 8, "bold")).pack(side="left")
 
             tk.Label(playit_frame, text="Playit.gg Setup Instructions:", fg=accent_color, bg="#001800", font=("Courier", 9, "bold")).pack(anchor="w", padx=5, pady=2)
             
             playit_guide = (
                 "  1. Download & install the Playit desktop app.\n"
                 "  2. Open Playit and click the claim link to link your account.\n"
-                "  3. Create a Bedrock tunnel (UDP port 19132) to get your shareable IP.\n"
-                "  - On your Playit dashboard, go to Tunnels and click Add Tunnel.\n"
-                "  - Set the Tunnel Type to Minecraft Bedrock (UDP).\n"
-                "  - Point to your local server IP (usually 127.0.0.1) and local port 19132.\n"
-                "  4. Copy Your Address: Once created, Playit will give you a public address\n"
-                "  (e.g. something.ply.gg:12345). Give this shareable IP to your players\n"
-                "  so they can connect!"
+                "  3. Create a Bedrock tunnel (UDP port 19132) pointing to 127.0.0.1:19132.\n"
+                "  4. Copy the public address Playit gives you and share it with players."
             )
-            tk.Label(playit_frame, text=playit_guide, fg="#aaffaa", bg="#001800", font=("Courier", 8), justify="left").pack(anchor="w", padx=15, pady=2)
+            tk.Label(playit_frame, text=playit_guide, fg="#aaffaa", bg="#001800", font=("Courier", 8), justify="left").pack(anchor="w", padx=5, pady=2)
 
-            def open_playit_site():
-                webbrowser.open("https://playit.gg/download")
-
-            tk.Button(playit_frame, text="[ Open Playit Download Page ]", command=open_playit_site, bg="#003322", fg=accent_color, font=("Courier", 8, "bold")).pack(anchor="w", padx=5, pady=4)
+            tk.Button(playit_frame, text="[ Open Playit Download Page ]", command=lambda: webbrowser.open("https://playit.gg/download"), bg="#003322", fg=accent_color, font=("Courier", 8, "bold")).pack(anchor="w", padx=5, pady=4)
 
             toggle_connection_boxes()
 
@@ -849,21 +838,20 @@ def run_desktop_wizard(data_dir):
 
             tk.Button(container, text="+ ADD EXTRA ADMIN ACCOUNT", command=add_admin, bg="#004422", fg=fg_color, font=("Courier", 8, "bold")).pack(anchor="w", pady=2)
 
-            tk.Label(container, text="Ban Security Password (Ban Matrix):", fg=fg_color, bg=bg_color, font=("Courier", 9)).pack(anchor="w", pady=(10, 0))
+            tk.Label(container, text="Ban Security Password (Blacklist):", fg=fg_color, bg=bg_color, font=("Courier", 9)).pack(anchor="w", pady=(10, 0))
             tk.Label(container, text="(Safety pin required when banning players from the web panel)", fg="#88cc88", bg=bg_color, font=("Courier", 8)).pack(anchor="w")
             ban_entry = tk.Entry(container, textvariable=state["ban_code"], bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25, show="*")
             ban_entry.pack(anchor="w", pady=2)
 
             tk.Label(container, text="Server Settings Password:", fg=fg_color, bg=bg_color, font=("Courier", 9)).pack(anchor="w", pady=(10, 0))
-            tk.Label(container, text="(Required to unlock and modify Server Settings)", fg="#88cc88", bg=bg_color, font=("Courier", 8)).pack(anchor="w")
+            tk.Label(container, text="(Required to unlock settings, blacklist, whitelist, and properties)", fg="#88cc88", bg=bg_color, font=("Courier", 8)).pack(anchor="w")
             settings_entry = tk.Entry(container, textvariable=state["settings_pw"], bg=entry_bg, fg=fg_color, insertbackground=fg_color, font=("Courier", 10), width=25, show="*")
             settings_entry.pack(anchor="w", pady=2)
-            state["settings_pw"].set("")
 
             def save_and_proceed():
                 u = u_entry.get().strip().lower()
                 p = p_entry.get().strip()
-                b_code = state["ban_code"].get().strip()
+                b_pw = state["ban_code"].get().strip()
                 s_pw = state["settings_pw"].get().strip()
 
                 if u and p:
@@ -871,21 +859,21 @@ def run_desktop_wizard(data_dir):
 
                 if not state["admins"]:
                     messagebox.showerror(
-                        "Input Required", 
+                        "Input Required",
                         "You must create an Admin Username and Password to proceed!"
                     )
                     return
 
-                if not b_code:
+                if not b_pw:
                     messagebox.showerror(
-                        "Input Required", 
-                        "Please enter a Ban Matrix Security Code!"
+                        "Input Required",
+                        "Please enter a Ban Security Password!"
                     )
                     return
 
                 if not s_pw:
                     messagebox.showerror(
-                        "Input Required", 
+                        "Input Required",
                         "Please enter a Server Settings Password!"
                     )
                     return
@@ -932,9 +920,10 @@ def run_desktop_wizard(data_dir):
         elif step == 6:
             tk.Label(container, text="[Step 6 of 6] Ready to Launch!", fg=accent_color, bg=bg_color, font=("Courier", 12, "bold")).pack(anchor="w", pady=(0, 10))
             
+            access_map = {"1": "Direct Connection", "2": "Bedrock Node Tunnel", "3": "Playit.gg Tunnel"}
             summary = (
                 f"Your server is ready to start:\n\n"
-                f"• Player Access: {'Playit.gg Tunnel' if state['game_choice'].get() == '2' else 'Direct Connection'}\n"
+                f"• Player Access: {access_map.get(state['game_choice'].get(), 'Direct Connection')}\n"
                 f"• Web Dashboard: Option {state['web_choice'].get()}\n"
                 f"• Admin Accounts: {max(1, len(state['admins']))} account(s)\n"
                 f"• Discord Bot: {'Configured' if state['bot_token'].get() else 'Skipped'}\n\n"
@@ -963,6 +952,288 @@ def get_server_properties():
     print(f"Error reading server.properties: {e}")
   return "Error reading server.properties..."
 
+def load_allowlist():
+    if os.path.exists(ALLOWLIST_FILE):
+        try:
+            with open(ALLOWLIST_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_allowlist(data):
+    with open(ALLOWLIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+WHITELIST_HTML_TEMPLATE = """
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/icon.png">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Bedrock Node">
+<style>
+body { 
+        background-color: #000000;
+        background-image: linear-gradient(rgba(0,0,0,0.85),rgba(0,0,0,0.85)), url("{{banner}}");
+        background-attachment: fixed;
+        background-position: center;
+        background-size: cover;
+        color: #0f4; 
+        font-family: sans-serif; 
+        margin: 0; 
+        padding: 20px; 
+        padding-top: 80px; 
+        display: flex; 
+        flex-direction: column; 
+        align-items: center; 
+        gap: 20px; 
+        position: relative; 
+    }
+
+.panel { 
+    width: 100%; 
+    max-width: 750px; 
+    border: 1px solid #0f45; 
+    padding: 25px; 
+    border-radius: 20px; 
+    background: rgba(0,12,0,0.95); 
+    box-sizing: border-box; 
+    position: relative; 
+}
+
+.close-btn {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    width: auto;
+    padding: 5px 12px;
+    background: #ff4444;
+    color: #fff;
+    font-size: 14px;
+    text-decoration: none;
+    font-family: monospace;
+    font-weight: bold;
+    border-radius: 5px;
+    margin: 0;
+}
+.close-btn:hover { background: #ff2222; }
+
+h2, h3 { text-align: center; color: #0f4; }
+input { width: 100%; background: #000; color: #0f4; border: 1px solid #0f44; padding: 10px; border-radius: 10px; box-sizing: border-box; font-size: 14px; margin-bottom: 10px; }
+button { width: 100%; padding: 10px; background: #0f4; color: #000; font-weight: bold; border: none; cursor: pointer; border-radius: 10px; font-size: 14px; }
+table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px; font-family: monospace; }
+th, td { border: 1px solid #0f43; padding: 8px; text-align: left; }
+th { background: rgba(0,255,64,0.1); color: #0ff; }
+.del-btn { background: #ff4444; color: #fff; padding: 5px 10px; border-radius: 5px; font-size: 12px; width: auto; margin: 0; }
+</style></head><body>
+
+<div class="panel">
+    <a href="/" class="close-btn">[X]</a>
+    <h2>Whitelist</h2>
+    
+    <h3>Add Target to Whitelist</h3>
+    <form id="whitelistForm" method="POST" onsubmit="interceptWhitelist(event)">
+        <input type="hidden" name="action" value="add">
+        <input id="whitelistName" name="player_name" placeholder="Exact Gamertag..." required autocomplete="off">
+        <button type="submit">EXECUTE WHITELIST ADD</button>
+    </form>
+
+    <h3 style="margin-top:30px;">Active Whitelisted Records</h3>
+    <table>
+        <tr><th>Gamertag / Key</th><th>Status</th><th>Action</th></tr>
+        {% if whitelist %}
+            {% for player in whitelist %}
+            <tr>
+                <td><b>{{ player.get('name') }}</b></td>
+                <td style="color: #4ade80;">Whitelisted</td>
+                <td>
+                    <button type="button" class="del-btn" onclick="removePlayer('{{ player.get('name') }}')">Remove</button>
+                </td>
+            </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="3" style="text-align:center; color:#ffcc00;">No active whitelist entries found.</td></tr>
+        {% endif %}
+    </table>
+</div>
+
+<div id="securityModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; justify-content:center; align-items:center; padding:20px; box-sizing:border-box;">
+    <div style="background:rgba(0,12,0,0.98); border:1px solid #0f45; padding:25px; border-radius:20px; width:100%; max-width:400px; text-align:center; box-sizing:border-box;">
+        <h3 id="modalTitle" style="color:#0f4; margin-top:0;">SECURITY CHECK</h3>
+        <p id="modalDesc" style="color:#0ff; font-size:13px; font-family:monospace; margin-bottom:15px;">Enter Secret Security Code:</p>
+        <input type="password" id="modalCodeInput" placeholder="Secret Security Code..." style="margin-bottom:15px;" autocomplete="off">
+        <div style="display:flex; gap:10px;">
+            <button type="button" id="modalConfirmBtn" style="background:#0f4; color:#000; margin-top:0;">CONFIRM</button>
+            <button type="button" onclick="closeSecurityModal()" style="background:#ff4444; color:#fff; margin-top:0;">CANCEL</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentMode = null; 
+let targetName = null;
+
+function closeSecurityModal() {
+    document.getElementById('securityModal').style.display = 'none';
+    document.getElementById('modalCodeInput').value = '';
+    currentMode = null;
+    targetName = null;
+}
+
+const isUnlocked = {{ 'true' if unlocked else 'false' }};
+
+function submitWhitelistForm(secCode) {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/whitelist';
+
+    if (currentMode === 'add') {
+        const actionInput = document.createElement('input');
+        actionInput.type = 'hidden';
+        actionInput.name = 'action';
+        actionInput.value = 'add';
+        form.appendChild(actionInput);
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'hidden';
+        nameInput.name = 'player_name';
+        nameInput.value = document.getElementById('whitelistName').value;
+        form.appendChild(nameInput);
+    } else if (currentMode === 'remove') {
+        const actionInput = document.createElement('input');
+        actionInput.type = 'hidden';
+        actionInput.name = 'action';
+        actionInput.value = 'remove';
+        form.appendChild(actionInput);
+
+        const targetInput = document.createElement('input');
+        targetInput.type = 'hidden';
+        targetInput.name = 'target_name';
+        targetInput.value = targetName;
+        form.appendChild(targetInput);
+    }
+
+    const codeInput = document.createElement('input');
+    codeInput.type = 'hidden';
+    codeInput.name = 'sec_code';
+    codeInput.value = secCode;
+    form.appendChild(codeInput);
+
+    document.body.appendChild(form);
+    form.submit();
+}
+
+function interceptWhitelist(e) {
+    e.preventDefault();
+    currentMode = 'add';
+    if (isUnlocked) {
+        submitWhitelistForm('');
+        return;
+    }
+    document.getElementById('modalTitle').innerText = 'SETTINGS PASSWORD CHECK';
+    document.getElementById('modalDesc').innerText = 'Enter Settings Password (unlocks for 10 mins):';
+    document.getElementById('modalCodeInput').value = '';
+    document.getElementById('securityModal').style.display = 'flex';
+    document.getElementById('modalCodeInput').focus();
+}
+
+function removePlayer(name) {
+    currentMode = 'remove';
+    targetName = name;
+    if (isUnlocked) {
+        submitWhitelistForm('');
+        return;
+    }
+    document.getElementById('modalTitle').innerText = 'SETTINGS PASSWORD CHECK';
+    document.getElementById('modalDesc').innerText = 'Enter Settings Password (unlocks for 10 mins):';
+    document.getElementById('modalCodeInput').value = '';
+    document.getElementById('securityModal').style.display = 'flex';
+    document.getElementById('modalCodeInput').focus();
+}
+
+document.getElementById('modalConfirmBtn').onclick = function() {
+    const secCode = document.getElementById('modalCodeInput').value;
+    if (!secCode) return;
+    submitWhitelistForm(secCode);
+};
+</script>
+</body></html>
+"""
+
+def is_settings_unlocked():
+    unlock_time = session.get("settings_unlock_time", 0)
+    return (time.time() - unlock_time) < 600
+
+def verify_settings_pw(entered_pw, area_name="Settings"):
+    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+    expected_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
+    if entered_pw == expected_pw:
+        session["settings_unlock_time"] = time.time()
+        session["settings_fail_count"] = 0
+        return True, 3
+
+    failures = session.get("settings_fail_count", 0) + 1
+    session["settings_fail_count"] = failures
+    username = session.get("username", "Unknown Admin")
+
+    if failures >= 3:
+        send_admin_alert(
+            f"🚨 **BRUTE FORCE LOCKOUT:** `{username}` failed the Settings Password 3 times in {area_name} and was forcefully logged out."
+        )
+        session.clear()
+        return False, 0
+
+    send_admin_alert(
+        f"⚠️ **SECURITY WARNING:** Incorrect Settings Password attempted in {area_name} by `{username}` (Attempt {failures}/3)."
+    )
+    return False, 3 - failures
+
+@app.route("/whitelist", methods=["GET", "POST"])
+def whitelist_page():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    
+    if request.method == "POST":
+        if not is_settings_unlocked():
+            sec_code = request.form.get("sec_code", "").strip()
+            ok, remaining = verify_settings_pw(sec_code, "Whitelist")
+            if not ok:
+                if remaining == 0:
+                    return redirect(url_for("login"))
+                return (
+                    f"<body style='background:#000;color:#f44;font-family:monospace;padding:50px;text-align:center;'>"
+                    f"<h1>ACCESS DENIED: Invalid Settings Password.</h1>"
+                    f"<p>Attempts remaining: {remaining}</p>"
+                    f"<a href='/whitelist' style='color:#0ff;'>Return to Whitelist</a></body>",
+                    403,
+                )
+
+        action = request.form.get("action")
+        whitelist_data = load_allowlist()
+        
+        if action == "add":
+            player_name = request.form.get("player_name", "").strip()
+            if player_name:
+                existing_names = [p.get("name", "").lower() for p in whitelist_data]
+                if player_name.lower() not in existing_names:
+                    whitelist_data.append({"ignoresPlayerLimit": False, "name": player_name})
+                    save_allowlist(whitelist_data)
+                    if is_running:
+                        send_to_mc("allowlist reload", "ADMIN")
+                        
+        elif action == "remove":
+            target_name = request.form.get("target_name", "").strip()
+            whitelist_data = [p for p in whitelist_data if p.get("name") != target_name]
+            save_allowlist(whitelist_data)
+            if is_running:
+                send_to_mc("allowlist reload", "ADMIN")
+                
+        return redirect(url_for("whitelist_page"))
+
+    whitelist_data = load_allowlist()
+    return render_template_string(WHITELIST_HTML_TEMPLATE, whitelist=whitelist_data, banner=BACKGROUND_URL, unlocked=is_settings_unlocked())
 
 def load_blacklist():
   with blacklist_lock:
@@ -1074,10 +1345,13 @@ def run_discord_bot():
 
 
 def restart_timer():
-    global next_restart_target
+    global next_restart_target, is_auto_restarting, restart_event, mc_process
     while True:
         try:
             load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+            if os.getenv("ENABLE_RESTARTS", "True").lower() != "true":
+                time.sleep(60)
+                continue
             interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
             start_time_str = os.getenv("RESTART_START_TIME", "").strip()
         except Exception:
@@ -1119,8 +1393,21 @@ def restart_timer():
             "SYSTEM",
         )
         time.sleep(60)
+        
+        with state_lock:
+            is_auto_restarting = True
+        
         send_to_mc("stop", "AUTORESTART")
-        time.sleep(65)
+        
+        if mc_process:
+            try:
+                mc_process.wait(timeout=30)
+            except Exception:
+                pass
+                
+        time.sleep(5)
+        restart_event.set()
+        time.sleep(10)
 
 
 def hourly_metrics_logger():
@@ -1252,9 +1539,38 @@ def load_unique_player_dates():
 
 
 def backup_world():
-  backup_dir = os.path.join(DATA_DIR, "daily_backup")
+  custom_backup_path = ""
+  env_path = os.path.join(DATA_DIR, "securekeys.env")
+  if os.path.exists(env_path):
+    try:
+      with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+          if line.strip().startswith("BACKUP_PATH="):
+            custom_backup_path = line.split("=", 1)[1].strip()
+            break
+    except Exception as e:
+      print(f">> Error reading BACKUP_PATH from env: {e}")
+
+  custom_backup_path = custom_backup_path.strip('"\'')
+
+  try:
+      max_backups_limit = int(os.getenv("MAX_BACKUPS", "5"))
+  except ValueError:
+      max_backups_limit = 5
+
+  if custom_backup_path:
+    backup_dir = custom_backup_path
+  else:
+    backup_dir = os.path.join(DATA_DIR, "daily_backup")
+
   if not os.path.exists(backup_dir):
-    os.makedirs(backup_dir)
+    try:
+      os.makedirs(backup_dir, exist_ok=True)
+    except Exception as e:
+      print(f">> [BACKUP ERROR] Failed to create custom backup directory at '{backup_dir}': {e}")
+      print(f">> Falling back to default server vault backup folder.")
+      backup_dir = os.path.join(DATA_DIR, "daily_backup")
+      os.makedirs(backup_dir, exist_ok=True)
 
   timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   world_path = os.path.join(SERVER_DIR, "worlds")
@@ -1263,15 +1579,15 @@ def backup_world():
     try:
       print(
           f"[{datetime.now().strftime('%H:%M:%S')}] Starting fast raw copy of"
-          " worlds folder to backups... Please wait."
+          f" worlds folder to backups ({backup_dir})... Please wait."
       )
       dest_folder = os.path.join(backup_dir, f"world_backup_{timestamp}")
       shutil.copytree(world_path, dest_folder)
       print(
           ">> World backup copy completed successfully:"
-          f" world_backup_{timestamp}"
+          f" {dest_folder}"
       )
-      cleanup_old_backups(backup_dir, max_backups=1)
+      cleanup_old_backups(backup_dir, max_backups=max_backups_limit)
     except Exception as e:
       print(f">> Backup failed: {e}")
   else:
@@ -1298,11 +1614,14 @@ def cleanup_old_backups(backup_dir, max_backups=1):
 
 
 def nightly_backup_scheduler():
-    global mc_process, is_backing_up, next_backup_target
+    global mc_process, is_backing_up, next_backup_target, is_auto_restarting, restart_event
 
     while True:
         try:
             load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+            if os.getenv("ENABLE_BACKUPS", "True").lower() != "true":
+                time.sleep(60)
+                continue
             backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
             backup_start_time_str = os.getenv("BACKUP_START_TIME", "").strip()
         except Exception:
@@ -1326,9 +1645,7 @@ def nightly_backup_scheduler():
                 target = None
 
         if not target:
-            target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
+            target = now + timedelta(hours=backup_interval_hours)
 
         with state_lock:
             next_backup_target = target
@@ -1349,14 +1666,26 @@ def nightly_backup_scheduler():
             "SYSTEM",
         )
         time.sleep(30)
+
+        with state_lock:
+            is_auto_restarting = True
+            
         send_to_mc("stop", "SYSTEM")
 
         if mc_process:
-            mc_process.wait()
+            try:
+                mc_process.wait(timeout=30)
+            except Exception:
+                pass
 
         time.sleep(5)
         backup_world()
         is_backing_up = False
+        
+        with state_lock:
+            is_auto_restarting = True
+        restart_event.set()
+        
         time.sleep(120)
 
 
@@ -1560,7 +1889,7 @@ def stdout_reader():
 
 
 def websocket_stats_broadcaster():
-  global backup_timer_start, next_restart_target, next_backup_target
+  global next_restart_target, next_backup_target
   while True:
     time.sleep(3)
     try:
@@ -1581,12 +1910,6 @@ def websocket_stats_broadcaster():
           remaining = timedelta(0)
       restart_in = str(remaining).split(".")[0]
 
-      try:
-        load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-        backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
-      except Exception:
-        backup_interval_hours = 24.0
-
       with state_lock:
           current_backup_target = next_backup_target
 
@@ -1597,9 +1920,10 @@ def websocket_stats_broadcaster():
           
       backup_in = str(backup_remaining).split(".")[0]
 
+      max_p = get_max_players()
       with state_lock:
         p_count = len(ONLINE_PLAYERS) if is_running else 0
-        players_str = f"{p_count} / 30" if is_running else "OFFLINE"
+        players_str = f"{p_count} / {max_p}" if is_running else "OFFLINE"
 
       disk_usage = shutil.disk_usage(SERVER_DIR)
       free_gb = round(disk_usage.free / (1024**3), 1)
@@ -1671,17 +1995,26 @@ def open_as_app(url):
         webbrowser.open(url)
 
 def local_console_bridge():
-  global is_running
+  global is_running, manual_restart_requested
   while True:
-    if is_running:
-      try:
-        cmd = input()
-        if cmd.strip():
+    try:
+      cmd = input()
+      cleaned_cmd = cmd.strip().lower()
+      if cleaned_cmd:
+        if cleaned_cmd == "start":
+          if not is_running:
+            print(f"{G}[CONSOLE] Manual start command received. Booting server...{END}")
+            with state_lock:
+              manual_restart_requested = True
+            restart_event.set()
+          else:
+            print(f"{Y}[CONSOLE] Server is already online! Ignored.{END}")
+        elif is_running:
           send_to_mc(cmd.strip(), "CONSOLE")
-      except EOFError:
-        break
-    else:
-      time.sleep(1)
+        else:
+          print(f"{Y}[CONSOLE] Server is offline. Type 'start' to boot it up.{END}")
+    except EOFError:
+      break
 
 
 def colorize_log(line):
@@ -1708,7 +2041,7 @@ def colorize_log(line):
 
 
 def server_manager():
-    global mc_process, is_running, is_restarting, seconds_left, start_time, is_backing_up
+    global mc_process, is_running, is_restarting, seconds_left, start_time, is_backing_up, is_auto_restarting, manual_restart_requested
     while True:
         with state_lock:
             is_restarting = False
@@ -1809,6 +2142,35 @@ def server_manager():
             while is_backing_up:
                 time.sleep(3)
 
+        load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+        crash_detection_enabled = os.getenv("ENABLE_CRASH_DETECTION", "True").lower() == "true"
+
+        with state_lock:
+            auto_restart_active = is_auto_restarting
+            is_auto_restarting = False
+            manual_restart_active = manual_restart_requested
+            manual_restart_requested = False
+
+        if not crash_detection_enabled and not auto_restart_active and not manual_restart_active:
+            print(f"{R}[INFO] Crash detection is DISABLED. Holding server offline until manual restart...{END}")
+            with state_lock:
+                is_restarting = False
+            
+            restart_event.clear()
+            
+            while not is_running:
+                if restart_event.wait(timeout=1.0):
+                    print(f"{G}[INFO] Manual restart triggered! Booting server back up...{END}")
+                    with state_lock:
+                        manual_restart_requested = False
+                    break
+                        
+                load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
+                if os.getenv("ENABLE_CRASH_DETECTION", "True").lower() == "true":
+                    break
+        else:
+            print(f"{G}[INFO] Restart or crash recovery active. Restarting server now...{END}")
+
         countdown_time = 15
         for i in range(countdown_time, -1, -1):
             seconds_left = i
@@ -1902,7 +2264,6 @@ def filter_and_aggregate(parsed_data, view_mode, target_input):
     if view_mode == "Day":
       cutoff_dt = latest_dt - timedelta(days=7)
       filtered = [row for row in parsed_data if row[0] >= cutoff_dt]
-      # Fallback: if no data exists in the last 7 days, show the latest available records
       if not filtered and parsed_data:
         filtered = parsed_data[-168:]
     elif view_mode == "Month":
@@ -2062,10 +2423,10 @@ def generate_plot_image(
 
   title_suffix = f" [{target_input}]" if target_input else " (Latest)"
   ax.set_title(
-      f"Stonercraft420 Metrics - {view_mode} View{title_suffix}",
-      color="#0f4",
-      pad=15,
-      fontweight="bold",
+   f"Bedrock Node Metrics - {view_mode} View{title_suffix}",
+   color="#0f4",
+   pad=15,
+   fontweight="bold",
   )
 
   if view_mode == "Day":
@@ -2131,14 +2492,36 @@ def serve_banner():
 def serve_icon():
     return send_from_directory(IMAGES_DIR, "icon.png")
 
-@app.route("/restart-script", methods=["POST"])
-def restart_script():
+@app.route("/start-server", methods=["POST"])
+def start_server_route():
+  global manual_restart_requested
   if not session.get("logged_in"):
     return jsonify({"error": "Unauthorized"}), 401
 
+  with state_lock:
+    manual_restart_requested = True
+
+  restart_event.set()
+
+  if is_running:
+    send_to_mc("stop", session.get("username", "ADMIN").upper())
+    send_admin_alert(f"🔄 **SERVER RESTART:** Restart triggered by `{session.get('username')}`.")
+  else:
+    send_admin_alert(f"🟢 **SERVER START:** Manual start triggered by `{session.get('username')}`.")
+
+  return jsonify({"success": True})
+
+@app.route("/restart-script", methods=["POST"])
+def restart_script():
+  global manual_restart_requested
+  if not session.get("logged_in"):
+    return jsonify({"error": "Unauthorized"}), 401
+
+  with state_lock:
+      manual_restart_requested = True
+
   send_admin_alert(
-      "🔄 **SCRIPT RESTART:** Graceful script restart initiated via web"
-      " dashboard."
+      "🔄 **SCRIPT RESTART:** Graceful script restart initiated via web dashboard."
   )
 
   send_to_mc("stop", "SCRIPT_RESTART")
@@ -2156,7 +2539,8 @@ def restart_script():
     try:
         python = sys.executable
         script_path = os.path.abspath(__file__)
-        subprocess.Popen([python, script_path] + sys.argv[1:], cwd=SCRIPT_DIR)
+        extra_args = [arg for arg in sys.argv[1:] if arg != "--restart"]
+        subprocess.Popen([python, script_path, "--restart"] + extra_args, cwd=SCRIPT_DIR)
     except Exception as e:
         print(f"Restart spawn error: {e}")
 
@@ -2164,6 +2548,7 @@ def restart_script():
 
   threading.Thread(target=do_restart, daemon=True).start()
   return jsonify({"success": True})
+
 
 @app.route("/manifest.json")
 def serve_manifest():
@@ -2182,23 +2567,22 @@ def manage_discord():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
     
-    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
-    
-    if not session.get("discord_unlocked"):
+    if not is_settings_unlocked():
         if request.method == "POST":
             entered_pw = request.form.get("settings_pw", "")
-            if entered_pw == expected_settings_pw:
-                session["discord_unlocked"] = True
+            ok, remaining = verify_settings_pw(entered_pw, "Discord")
+            if ok:
                 return redirect(url_for("manage_discord"))
+            elif remaining == 0:
+                return redirect(url_for("login"))
             else:
                 return render_template_string(
-                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>DISCORD LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password. Try again:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
-                    b=BACKGROUND_URL
+                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>DISCORD LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password ({{r}} attempts left):</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+                    b=BACKGROUND_URL, r=remaining
                 )
         
         return render_template_string(
-            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>DISCORD LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>DISCORD LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password (unlocks for 10 mins):</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
             b=BACKGROUND_URL
         )
 
@@ -2315,8 +2699,7 @@ def manage_bans():
     return redirect(url_for("login"))
 
   load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-  expected_code = os.getenv("BAN_SECRET_CODE", "BAN")
-  ip = get_real_ip()
+  expected_code = os.getenv("BAN_SECRET_CODE", "BAN123")
 
   if request.method == "POST":
     action = request.form.get("action")
@@ -2329,22 +2712,22 @@ def manage_bans():
 
       if failures >= 3:
         send_admin_alert(
-            f"🚨 **BRUTE FORCE LOCKOUT:** `{username}` failed the Ban Matrix"
+            f"🚨 **BRUTE FORCE LOCKOUT:** `{username}` failed the Blacklist action / login"
             " security code 3 times and was forcefully logged out."
         )
         session.clear()
         return redirect(url_for("login"))
 
       send_admin_alert(
-          "⚠️ **SECURITY WARNING:** Incorrect security code attempted in Ban"
-          f" Matrix by `{username}` (Attempt {failures}/3)."
+          "⚠️ **SECURITY WARNING:** Incorrect security code attempted in Blacklist "
+          f"by `{username}` (Attempt {failures}/3)."
       )
       return (
           """
             <body style='background:#000;color:#f44;font-family:monospace;padding:50px;text-align:center;'>
                 <h1>ACCESS DENIED: Invalid Security Code.</h1>
                 <p>Attempts remaining: {}</p>
-                <a href='/bans' style='color:#0ff;'>Return to Ban Matrix</a>
+                <a href='/bans' style='color:#0ff;'>Return to Blacklist</a>
             </body>
             """.format(3 - failures),
           403,
@@ -2402,23 +2785,22 @@ def manage_properties():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
     
-    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
-    
-    if not session.get("properties_unlocked"):
+    if not is_settings_unlocked():
         if request.method == "POST":
             entered_pw = request.form.get("settings_pw", "")
-            if entered_pw == expected_settings_pw:
-                session["properties_unlocked"] = True
+            ok, remaining = verify_settings_pw(entered_pw, "Properties")
+            if ok:
                 return redirect(url_for("manage_properties"))
+            elif remaining == 0:
+                return redirect(url_for("login"))
             else:
                 return render_template_string(
-                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>PROPERTIES LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password. Try again:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
-                    b=BACKGROUND_URL
+                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>PROPERTIES LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password ({{r}} attempts left):</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+                    b=BACKGROUND_URL, r=remaining
                 )
         
         return render_template_string(
-            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>PROPERTIES LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>PROPERTIES LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password (unlocks for 10 mins):</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
             b=BACKGROUND_URL
         )
     
@@ -2542,23 +2924,22 @@ def manage_settings():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
     
-    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
-    
-    if not session.get("settings_unlocked"):
+    if not is_settings_unlocked():
         if request.method == "POST":
             entered_pw = request.form.get("settings_pw", "")
-            if entered_pw == expected_settings_pw:
-                session["settings_unlocked"] = True
+            ok, remaining = verify_settings_pw(entered_pw, "Settings")
+            if ok:
                 return redirect(url_for("manage_settings"))
+            elif remaining == 0:
+                return redirect(url_for("login"))
             else:
                 return render_template_string(
-                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>SETTINGS LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password. Try again:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
-                    b=BACKGROUND_URL
+                    """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#f44;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #f44;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#f44;border:1px solid #f44;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#f44;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>SETTINGS LOCKED</h2><p style="color:#ffcc00;font-size:13px;">Incorrect password ({{r}} attempts left):</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+                    b=BACKGROUND_URL, r=remaining
                 )
         
         return render_template_string(
-            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>SETTINGS LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password:</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
+            """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="/icon.png"><style>body{background:#000 url("{{b}}") center fixed;background-size:cover;color:#0f4;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:rgba(0,0,0,0.9);padding:30px;border:1px solid #0f4;border-radius:15px;text-align:center;}input{width:100%;padding:10px;margin:5px 0;background:#000;color:#0f4;border:1px solid #0f4;box-sizing:border-box;font-size:16px;}button{width:100%;padding:10px;background:#0f4;color:#000;font-weight:bold;border:none;margin-top:10px;cursor:pointer;font-size:16px;}</style></head><body><div class="box"><h2>SETTINGS LOCKED</h2><p style="color:#88cc88;font-size:13px;">Enter Settings Password (unlocks for 10 mins):</p><form method="POST"><input name="settings_pw" type="password" placeholder="Password..." required autofocus><button>UNLOCK</button></form><br><a href="/" style="color:#0ff;font-size:12px;text-decoration:none;">[ Return to Dashboard ]</a></div></body></html>""",
             b=BACKGROUND_URL
         )
     
@@ -2568,10 +2949,16 @@ def manage_settings():
     if request.method == "POST":
         cf_token = request.form.get("cf_token", "").strip()
 
+        enable_restarts = "True" if request.form.get("enable_restarts") == "True" else "False"
+        enable_backups = "True" if request.form.get("enable_backups") == "True" else "False"
+        enable_crash_detection = "True" if request.form.get("enable_crash_detection") == "True" else "False"
+
         restart_hours = request.form.get("restart_hours", "6").strip()
         restart_start_time = request.form.get("restart_start_time", "").strip()
         backup_hours = request.form.get("backup_hours", "24").strip()
+        max_backups = request.form.get("max_backups", "5").strip()
         backup_start_time = request.form.get("backup_start_time", "").strip()
+        backup_path = request.form.get("backup_path", "").strip().replace('\\', '/')
 
         new_ban_code = request.form.get("ban_code", "").strip()
         ban_code = new_ban_code if new_ban_code else expected_code
@@ -2614,10 +3001,15 @@ def manage_settings():
             "# --- Bedrock Node CONFIGURATION ---\n"
             f"USE_PLAYIT={use_playit}\n"
             f"CLOUDFLARE_TUNNEL_TOKEN={cf_token}\n"
+            f"ENABLE_RESTARTS={enable_restarts}\n"
             f"RESTART_INTERVAL_HOURS={restart_hours}\n"
             f"RESTART_START_TIME={restart_start_time}\n"
-            f"BACKUP_INTERVAL_HOURS={backup_hours}\n\n"
-            f"BACKUP_START_TIME={backup_start_time}\n\n"
+            f"ENABLE_BACKUPS={enable_backups}\n"
+            f"BACKUP_INTERVAL_HOURS={backup_hours}\n"
+            f"BACKUP_START_TIME={backup_start_time}\n"
+            f"MAX_BACKUPS={max_backups}\n"
+            f"BACKUP_PATH={backup_path}\n"
+            f"ENABLE_CRASH_DETECTION={enable_crash_detection}\n\n"
             f"SLOT3_LABEL={slot3_label}\n"
             f"SLOT3_CMD={slot3_cmd}\n\n"
             f"DISCORD_BOT_TOKEN={bot_token}\n"
@@ -2684,58 +3076,80 @@ def manage_settings():
             </div>
 
             <form method="POST">
-                <!-- ENGINE & AUTOMATION SECTION -->
                 <div class="section-card">
                     <div class="section-title">Engine & Automation</div>
     
-                    <label>Cloudflare Tunnel Token:</label>
-                    <input name="cf_token" value="{{ config.cf_token }}" autocomplete="off">
-    
-                    <div style="display: flex; gap: 12px; margin-bottom: 12px;">
-                        <div style="flex: 1;">
-                              <label>Restart Interval (Hours):</label>
-                            <input name="restart_hours" value="{{ config.restart_hours }}" autocomplete="off">
-                          </div>
-                          <div style="flex: 1;">
-                              <label>First Restart Time (HH:MM):</label>
-                              <input name="restart_start_time" value="{{ config.restart_start_time }}" autocomplete="off" placeholder="e.g. 06:00">
+                    <div style="border-top:1px dashed #0f43; padding-top:10px; margin-top:10px;">
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:10px; color:#0ff;">
+                            <input type="checkbox" name="enable_restarts" value="True" {% if config.enable_restarts %}checked{% endif %} style="width:auto; margin:0;"> Enable Automated Restarts
+                        </label>
+                        <div style="display: flex; gap: 12px; margin-bottom: 12px;">
+                            <div style="flex: 1;">
+                                <label>Restart Interval (Hours):</label>
+                                <input name="restart_hours" value="{{ config.restart_hours }}" autocomplete="off">
+                            </div>
+                            <div style="flex: 1;">
+                                <label>First Restart Time (HH:MM):</label>
+                                <input name="restart_start_time" value="{{ config.restart_start_time }}" autocomplete="off" placeholder="e.g. 06:00">
+                            </div>
                         </div>
                     </div>
 
-                    <div style="display: flex; gap: 12px;">
-                        <div style="flex: 1;">
-                            <label>Backup Interval (Hours):</label>
-                            <input name="backup_hours" value="{{ config.backup_hours }}" autocomplete="off">
+                    <div style="border-top:1px dashed #0f43; padding-top:10px; margin-top:10px;">
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:10px; color:#ff00ff;">
+                            <input type="checkbox" name="enable_backups" value="True" {% if config.enable_backups %}checked{% endif %} style="width:auto; margin:0;"> Enable Automated Backups
+                        </label>
+                        <div style="display: flex; gap: 12px; margin-bottom: 12px;">
+                            <div style="flex: 1;">
+                                <label>Backup Interval (Hours):</label>
+                                <input name="backup_hours" value="{{ config.backup_hours }}" autocomplete="off">
+                            </div>
+                            <div style="flex: 1;">
+                                <label>First Backup Time (HH:MM):</label>
+                                <input name="backup_start_time" value="{{ config.backup_start_time }}" autocomplete="off" placeholder="e.g. 08:00">
+                            </div>
                         </div>
-                        <div style="flex: 1;">
-                            <label>First Backup Time (HH:MM):</label>
-                            <input name="backup_start_time" value="{{ config.backup_start_time }}" autocomplete="off" placeholder="e.g. 08:00">
+                        <div style="margin-bottom: 12px;">
+                            <label>Max Backups to Keep (Retention Limit):</label>
+                            <input name="max_backups" value="{{ config.max_backups }}" autocomplete="off" placeholder="e.g. 5 or 10">
+                        </div>
+                        <label>Custom Backup Storage Path (Leave blank for default server vault):</label>
+                        <input name="backup_path" value="{{ config.backup_path }}" autocomplete="off" placeholder="e.g. D:\\MyBackups or /home/user/backups">
+                    </div>
+
+                    <div style="border-top:1px dashed #0f43; padding-top:10px; margin-top:10px;">
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:12px; color:#ff4444;">
+                            <input type="checkbox" name="enable_crash_detection" value="True" {% if config.enable_crash_detection %}checked{% endif %} style="width:auto; margin:0;"> Enable Crash Detection & Auto-Recovery
+                        </label>
+                    </div>
+
+                    <div style="border-top:1px dashed #0f43; padding-top:10px; margin-top:10px;">
+                        <div style="display: flex; gap: 12px;">
+                            <div style="flex: 1;">
+                                <label>Slot 3 Button Label:</label>
+                                <input name="slot3_label" value="{{ config.slot3_label }}" autocomplete="off" placeholder="SLOT 3">
+                            </div>
+                            <div style="flex: 1;">
+                                <label>Slot 3 Command:</label>
+                                <input name="slot3_cmd" value="{{ config.slot3_cmd }}" autocomplete="off" placeholder="e.g. say Hello Server!">
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <div class="section-card">
-                    <div class="section-title">Custom Action Button (Slot 3)</div>
-                    
-                    <label>Button Label:</label>
-                    <input name="slot3_label" value="{{ config.slot3_label }}" autocomplete="off" placeholder="e.g. SET DAY">
-                    
-                    <label>Command to Execute:</label>
-                    <input name="slot3_cmd" value="{{ config.slot3_cmd }}" autocomplete="off" placeholder="e.g. time set day">
-                </div>
-
-                <!-- SECURITY & ACCESS SECTION -->
                 <div class="section-card">
                     <div class="section-title">Security & Access Control</div>
                     
-                    <label>Ban Matrix Security Code (Leave blank to keep current):</label>
+                    <label>Cloudflare Tunnel Token:</label>
+                    <input name="cf_token" value="{{ config.cf_token }}" autocomplete="off">
+
+                    <label>Blacklist Security Code (Leave blank to keep current):</label>
                     <input type="password" name="ban_code" placeholder="••••••••" autocomplete="off">
                     
                     <label>Change Web Dashboard Password (Leave blank to keep current):</label>
                     <input type="password" name="new_admin_pw" placeholder="New Password..." autocomplete="off">
                 </div>
 
-                <!-- ADD ADMIN ACCOUNT SECTION -->
                 <div class="section-card">
                     <div class="section-title">Add New Admin Account</div>
                     
@@ -2748,7 +3162,6 @@ def manage_settings():
                 
                 <button type="submit">SAVE CHANGES</button>
 
-                <!-- RESTART SCRIPT SECTION -->
                 <div class="section-card" style="border-color: #ffaa0044; background: rgba(255, 170, 0, 0.03); margin-top: 15px;">
                     <div class="section-title" style="color: #ffaa0088;">System Control</div>
                     <p style="font-size: 12px; color: #ffcc00; font-family: monospace; margin-bottom: 12px;">
@@ -2778,10 +3191,15 @@ def manage_settings():
         banner=BACKGROUND_URL,
         config={
             "cf_token": os.getenv("CLOUDFLARE_TUNNEL_TOKEN", ""),
+            "enable_restarts": os.getenv("ENABLE_RESTARTS", "True").lower() == "true",
             "restart_hours": os.getenv("RESTART_INTERVAL_HOURS", "6"),
             "restart_start_time": os.getenv("RESTART_START_TIME", ""),
+            "enable_backups": os.getenv("ENABLE_BACKUPS", "True").lower() == "true",
             "backup_hours": os.getenv("BACKUP_INTERVAL_HOURS", "24"),
             "backup_start_time": os.getenv("BACKUP_START_TIME", ""),
+            "max_backups": os.getenv("MAX_BACKUPS", "5"),
+            "backup_path": os.getenv("BACKUP_PATH", ""),
+            "enable_crash_detection": os.getenv("ENABLE_CRASH_DETECTION", "True").lower() == "true",
             "ban_code": "",
             "slot3_label": os.getenv("SLOT3_LABEL", "SLOT 3"),
             "slot3_cmd": os.getenv("SLOT3_CMD", ""),
@@ -2796,11 +3214,11 @@ def shutdown():
     data = request.get_json() or {}
     entered_pw = data.get("password", "").strip()
     
-    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-    expected_settings_pw = os.getenv("SETTINGS_PASSWORD", "admin123")
-    
-    if entered_pw != expected_settings_pw:
-        return jsonify({"success": False, "error": "Incorrect settings password!"}), 403
+    ok, remaining = verify_settings_pw(entered_pw, "Shutdown")
+    if not ok:
+        if remaining == 0:
+            return jsonify({"success": False, "error": "3 failed attempts! Session locked out."}), 403
+        return jsonify({"success": False, "error": f"Incorrect settings password! ({remaining} attempts left)"}), 403
     
     send_admin_alert("🛑 **SYSTEM SHUTDOWN:** Graceful shutdown initiated via web dashboard.")
     
@@ -2841,7 +3259,7 @@ def server_status():
 def stats():
   if not session.get("logged_in"):
     return jsonify({"error": "Unauthorized"}), 401
-  global ONLINE_PLAYERS, backup_timer_start, next_backup_target
+  global ONLINE_PLAYERS, next_restart_target, next_backup_target
   uptime = (
       str(datetime.now() - start_time).split(".")[0]
       if start_time
@@ -2849,16 +3267,14 @@ def stats():
   )
 
   now = datetime.now()
-  try:
-    load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
-    interval_hours = float(os.getenv("RESTART_INTERVAL_HOURS", 6))
-    backup_interval_hours = float(os.getenv("BACKUP_INTERVAL_HOURS", 24))
-  except Exception:
-    interval_hours = 6.0
-    backup_interval_hours = 24.0
 
-  next_target = restart_timer_start + timedelta(hours=interval_hours)
-  remaining = next_target - now if next_target > now else timedelta(0)
+  with state_lock:
+      current_restart_target = next_restart_target
+
+  if current_restart_target and current_restart_target > now:
+      remaining = current_restart_target - now
+  else:
+      remaining = timedelta(0)
   restart_in = str(remaining).split(".")[0]
 
   with state_lock:
@@ -2961,17 +3377,13 @@ def logout():
 
 @app.route("/", methods=["GET", "POST"])
 def home():
+  global manual_restart_requested
   if not session.get("logged_in"):
     return redirect(url_for("login"))
 
   load_dotenv(os.path.join(DATA_DIR, "securekeys.env"), override=True)
   slot3_label = os.getenv("SLOT3_LABEL") or "SLOT 3"
   slot3_cmd = os.getenv("SLOT3_CMD") or ""
-
-  session.pop("settings_unlocked", None)
-  session.pop("properties_unlocked", None)
-  session.pop("discord_unlocked", None)
-
   if is_restarting:
     return render_template_string(
         """<body style="background:#000;color:#f44;text-align:center;padding-top:100px;font-family:monospace;"><h1>REBOOTING</h1><div style="font-size:80px;">{{s}}</div><script>setInterval(()=>location.reload(),5000)</script></body>""",
@@ -2981,7 +3393,6 @@ def home():
     if "note" in request.form:
       note_content = request.form.get("note", "")
       
-      # Normalize line endings to prevent double spacing
       note_content = note_content.replace("\r\n", "\n").replace("\r", "\n")
       
       with notes_lock:
@@ -2990,7 +3401,14 @@ def home():
     else:
       c = request.form.get("c", "").strip()
       if c:
-        send_to_mc(c, session["username"].upper())
+        if c.lower() == "start":
+          if not is_running:
+            with state_lock:
+              manual_restart_requested = True
+            restart_event.set()
+            send_admin_alert(f"🟢 **SERVER START:** Manual start triggered via web console by `{session.get('username')}`.")
+        else:
+          send_to_mc(c, session["username"].upper())
     return redirect(url_for("home"))
 
   return render_template_string(
@@ -3077,14 +3495,13 @@ def home():
         position: absolute;
         right: 0;
         top: 100%;
-        /* REMOVED margin-top and added padding-top to create an invisible hover bridge */
+       
         padding-top: 8px; 
-        background-color: transparent; /* Makes the padding area transparent but hoverable */
+        background-color: transparent;
         min-width: 200px;
         z-index: 1001;
     }
 
-    /* Inner box wrapper to keep your border and background intact */
     .dropdown-inner {
         background-color: rgba(0, 12, 0, 0.98);
         border: 1px solid #0f45;
@@ -3200,28 +3617,25 @@ def home():
             <button class="dropbtn">ADMIN TOOLS ▼</button>
             <div class="dropdown-content">
                 <div class="dropdown-inner">
-                    <!-- Monitoring & Tools -->
                     <div style="padding: 8px 16px 2px 16px; font-size: 10px; font-family: monospace; color: #0f48; letter-spacing: 1px;">MONITORING</div>
                     <button type="button" onclick="openMetricsModal()">View Graphs</button>
                     <button type="button" onclick="openNotesModal()">Admin Notes</button>
                     
                     <hr style="border:0; border-top:1px solid #0f42; margin:4px 0;">
                     
-                    <!-- Server Management -->
                     <div style="padding: 6px 16px 2px 16px; font-size: 10px; font-family: monospace; color: #0f48; letter-spacing: 1px;">MANAGEMENT</div>
+                    <a href="/whitelist">Manage Whitelist</a>
                     <a href="/bans">Manage Bans</a>
                     <a href="/properties">Server Properties</a>
                     <a href="/settings">Server Settings</a>
 
                     <hr style="border:0; border-top:1px solid #0f42; margin:4px 0;">
                     
-                    <!-- Integrations -->
                     <div style="padding: 6px 16px 2px 16px; font-size: 10px; font-family: monospace; color: #0f48; letter-spacing: 1px;">INTEGRATIONS</div>
                     <a href="/discord">Discord Integration</a>
 
                     <hr style="border:0; border-top:1px solid #0f42; margin:4px 0;">
                     
-                    <!-- Support -->
                     <button type="button" onclick="openContactModal()">Contact & Support</button>
                 </div>
             </div>
@@ -3396,18 +3810,19 @@ def home():
     }
 
     document.getElementById('restartConfirmBtn').onclick = function() {
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = '/';
-
-        const cmdInput = document.createElement('input');
-        cmdInput.type = 'hidden';
-        cmdInput.name = 'c';
-        cmdInput.value = 'stop';
-        form.appendChild(cmdInput);
-
-        document.body.appendChild(form);
-        form.submit();
+        fetch('/start-server', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                closeRestartModal();
+                location.reload();
+            } else {
+                alert("Failed to restart server.");
+            }
+        })
+        .catch(() => {
+            alert("Network error while trying to restart server.");
+        });
     };
 
     window.addEventListener('beforeunload', () => {
@@ -3500,7 +3915,19 @@ if __name__ == "__main__":
     else:
         print("Configuration found. Starting Bedrock Node...")
 
-        threading.Thread(target=lambda: (time.sleep(2), open_as_app("http://localhost:5000")), daemon=True).start()
+        if "--restart" not in sys.argv:
+            threading.Thread(target=lambda: (time.sleep(2), open_as_app("http://localhost:5000")), daemon=True).start()
+
+    load_dotenv(env_path, override=True)
+    DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    ADMIN_WEBHOOK_URL = os.getenv("ADMIN_WEBHOOK_URL", "").strip()
+    DISCORD_ENABLED = bool(DISCORD_BOT_TOKEN)
+    WEBHOOK_ENABLED = bool(ADMIN_WEBHOOK_URL)
+    VC_STATUS_ID = int(os.getenv("VC_STATUS_ID", 0))
+    VC_PLAYERS_ID = int(os.getenv("VC_PLAYERS_ID", 0))
+    FLASK_PORT = int(os.getenv("FLASK_PORT", 5000))
+    FLASK_HOST = os.getenv("FLASK_HOST", "127.0.0.1")
+    app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
 
     try:
         from matplotlib.figure import Figure
@@ -3526,6 +3953,11 @@ if __name__ == "__main__":
             shell=True,
             capture_output=True,
         )
+
+    if os.getenv("USE_PLAYIT", "False").lower() == "true":
+        start_playit_process()
+    if os.getenv("CLOUDFLARE_TUNNEL_TOKEN", "").strip():
+        start_cloudflare_process()
 
     try:
         threading.Thread(target=server_manager, daemon=True).start()
